@@ -31,3 +31,32 @@ data_source:
     token_env: "GATEWAY_TOKEN"
 logging:
   level: INFO
+
+alert_policy:
+  trading_hours_only: true
+  max_data_age_seconds: 120
+  lookback_bars: 20
+
+  # 每天“入选”最多2买2卖；若出现更优候选可替换入选（按比例阈值）
+  daily_budget:
+    max_buy: 2
+    max_sell: 2
+    enable_replacement: true
+    replace_min_improve_ratio: 0.005  # 0.5%
+
+  # 低点/高点判定相关
+  low_high:
+    near_extreme_ratio: 0.005  # 0.5%：BUY接近近期低点/SELL接近近期高点
+    volume_multiplier_buy: 1.2
+    macd_hist_trend_bars: 3
+
+  # 评分权重（可后续微调）
+  score_weights:
+    price_position: 0.45
+    macd_momentum: 0.30
+    volume: 0.15
+    ma_trend: 0.10
+
+  log:
+    dir: logs
+    file_prefix: trade_decisions

@@ -22,10 +22,10 @@
       "python": "${workspaceFolder}/.venv/bin/python"
     },
     {
-      "name": "Agent (LangChain) - Test Mode",
+      "name": "Agent - Test Mode",
       "type": "python",
       "request": "launch",
-      "module": "src.core.agent_langchain",
+      "module": "src.core.main",
       "args": [],
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
@@ -36,10 +36,10 @@
       }
     },
     {
-      "name": "Agent (LangChain) - Trading Hours",
+      "name": "Agent - Trading Hours",
       "type": "python",
       "request": "launch",
-      "module": "src.core.agent_langchain",
+      "module": "src.core.main",
       "args": [],
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",

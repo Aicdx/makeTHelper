@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import time
 from datetime import datetime, timedelta
 
@@ -15,12 +16,20 @@ from src.indicators.indicators import latest_snapshot
 from src.ai.llm_agent import LLMDecision
 from src.signals.signals import SignalEngine, SignalType
 from src.utils.symbols import normalize_symbol
+from src.utils.dotenv_loader import load_env
+from src.utils.alert_policy import DailyBudget, DecisionLogger, load_alert_policy_cfg, score_low_high
 
 
 def _setup_logging(level: str) -> None:
+    # Ensure logs are visible in VSCode integrated terminal by forcing a StreamHandler.
+    # `force=True` avoids situations where other modules configured logging earlier.
+    handler = logging.StreamHandler(stream=sys.stdout)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=[handler],
+        force=True,
     )
 
 
@@ -33,6 +42,8 @@ def _is_trading_time_cn(now: datetime) -> bool:
 
 
 def main() -> None:
+    load_env()  # Load .env file for proxy settings, etc.
+
     with open("config.yaml", "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
@@ -67,6 +78,9 @@ def main() -> None:
 
     llm_last_call_at: dict[str, datetime] = {}
 
+    # Test mode: force exactly one LLM decision per symbol once we have enough data.
+    test_llm_done: dict[str, bool] = {}
+
     log = logging.getLogger(__name__)
     log.info(f"Monitoring symbols: {symbols}")
     log.info(
@@ -76,11 +90,24 @@ def main() -> None:
         os.getenv("LLM_API_BASE", ""),
     )
 
+    agent_cfg = cfg.get("agent", {})
+    test_mode = bool(agent_cfg.get("test_mode", False))
+    test_force_llm = bool(agent_cfg.get("test_force_llm", False))
+    heartbeat_every_loops = int(agent_cfg.get("heartbeat_every_loops", 1))
+
+    if test_mode:
+        log.warning("Test mode enabled: will run outside trading hours; test_force_llm=%s", test_force_llm)
+
+    loop_i = 0
     while True:
+        loop_i += 1
         now = datetime.now()
-        if not _is_trading_time_cn(now):
+        if not test_mode and not _is_trading_time_cn(now):
             time.sleep(min(poll_interval, 30))
             continue
+
+        if test_mode and (loop_i % max(1, heartbeat_every_loops) == 0):
+            log.info("[TEST] loop=%d now=%s symbols=%d", loop_i, now.strftime("%Y-%m-%d %H:%M:%S"), len(symbols))
 
         for sym in symbols:
             bars, source_tag = fetch_bars(cfg, sym)
@@ -132,12 +159,39 @@ def main() -> None:
                 ind=snap,
             )
 
+            # Test mode: once we have enough data, force exactly ONE LLM decision per symbol.
+            if test_mode and test_force_llm and not test_llm_done.get(sym, False):
+                from src.signals.signals import SignalEvent
+
+                event = SignalEvent(
+                    symbol=sym,
+                    ts=latest_bar.ts,
+                    signal=SignalType.INFO,
+                    reason="TEST_FORCE_LLM_ONCE",
+                    dif=snap.dif,
+                    dea=snap.dea,
+                    hist=snap.hist,
+                    vol=snap.vol,
+                    vma=snap.vma,
+                    close=latest_bar.close,
+                )
+                test_llm_done[sym] = True
+                log.warning(
+                    "[TEST] first data ready -> forcing ONE LLM decision for %s at %s",
+                    sym,
+                    latest_bar.ts.strftime("%Y-%m-%d %H:%M"),
+                )
+
             if event is None:
                 continue
 
             if llm_enabled and event.signal in {SignalType.BUY_T, SignalType.SELL_T, SignalType.DISABLE_T, SignalType.INFO}:
                 last_call = llm_last_call_at.get(sym)
-                if last_call is None or (latest_bar.ts - last_call) >= llm_throttle:
+                bypass_throttle = test_mode and event.reason == "TEST_FORCE_LLM_ONCE"
+                if bypass_throttle:
+                    log.info("[TEST] bypass throttle for %s (first forced decision)", sym)
+
+                if bypass_throttle or last_call is None or (latest_bar.ts - last_call) >= llm_throttle:
                     try:
                         ctx = DecisionContext(
                             symbol=sym,
@@ -156,26 +210,37 @@ def main() -> None:
                         decision: LLMDecision = llm_decision(ctx)
                         llm_last_call_at[sym] = latest_bar.ts
 
-                        if decision.confidence >= llm_min_conf and decision.action in {"BUY_T", "SELL_T", "DISABLE_T", "HOLD"}:
-                            emit(
-                                event.__class__(
-                                    symbol=sym,
-                                    ts=latest_bar.ts,
-                                    signal=SignalType(decision.action)
-                                    if decision.action in {"BUY_T", "SELL_T", "DISABLE_T"}
-                                    else SignalType.INFO,
-                                    reason=f"LLM action={decision.action} conf={decision.confidence:.2f}; reasons="
-                                    + "; ".join(decision.reasons[:6]),
-                                    dif=event.dif,
-                                    dea=event.dea,
-                                    hist=event.hist,
-                                    vol=event.vol,
-                                    vma=event.vma,
-                                    close=event.close,
-                                )
+                        log.info(
+                            "LLM decision for %s: action=%s conf=%.2f reasons=%s risks=%s plan=%s",
+                            sym,
+                            decision.action,
+                            decision.confidence,
+                            "; ".join(decision.reasons[:3]),
+                            "; ".join(decision.risks[:3]),
+                            "; ".join(decision.suggested_plan[:3]),
+                        )
+
+                        reason_prefix = f"LLM action={decision.action} conf={decision.confidence:.2f}"
+                        if decision.confidence < llm_min_conf:
+                            reason_prefix += " (low_conf)"
+
+                        emit(
+                            event.__class__(
+                                symbol=sym,
+                                ts=latest_bar.ts,
+                                signal=SignalType(decision.action)
+                                if decision.action in {"BUY_T", "SELL_T", "DISABLE_T"}
+                                else SignalType.INFO,
+                                reason=f"{reason_prefix}; reasons="
+                                + "; ".join(decision.reasons[:6]),
+                                dif=event.dif,
+                                dea=event.dea,
+                                hist=event.hist,
+                                vol=event.vol,
+                                vma=event.vma,
+                                close=event.close,
                             )
-                        else:
-                            emit(event)
+                        )
                     except Exception as e:
                         log.error("LLM decision failed for %s: %s", sym, e)
                         emit(event)
