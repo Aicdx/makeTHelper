@@ -1,0 +1,33 @@
+symbols:
+  - sz300986
+poll_interval_seconds: 15
+window_size: 600
+agent:
+  heartbeat_every_loops: 1
+  test_mode: true
+  test_force_llm: true
+indicators:
+  macd:
+    fast: 12
+    slow: 26
+    signal: 9
+  ma_trend: 60
+  vma: 20
+strategy:
+  confirm_bars: 2
+  cooldown_minutes: 15
+  volume_multiplier: 1.2
+  enable_trend_filter: true
+llm_agent:
+  enabled: true
+  model: "Qwen/Qwen2.5-72B-Instruct"
+  min_confidence: 0.6
+  throttle_minutes: 5
+data_source:
+  primary: gateway
+  fallback: akshare
+  gateway:
+    base_url: "http://127.0.0.1:8000"
+    token_env: "GATEWAY_TOKEN"
+logging:
+  level: INFO

@@ -1,0 +1,54 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Gateway (FastAPI) - uvicorn",
+      "type": "python",
+      "request": "launch",
+      "module": "uvicorn",
+      "args": [
+        "src.server.gateway_server:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--log-level",
+        "debug",
+        "--reload"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "python": "${workspaceFolder}/.venv/bin/python"
+    },
+    {
+      "name": "Agent (LangChain) - Test Mode",
+      "type": "python",
+      "request": "launch",
+      "module": "src.core.agent_langchain",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "env": {
+        "DOTENV_DISABLE": "0"
+      }
+    },
+    {
+      "name": "Agent (LangChain) - Trading Hours",
+      "type": "python",
+      "request": "launch",
+      "module": "src.core.agent_langchain",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "env": {
+        "DOTENV_DISABLE": "0"
+      }
+    }
+  ]
+}
+
