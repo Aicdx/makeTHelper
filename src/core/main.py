@@ -19,6 +19,8 @@ from src.utils.symbols import normalize_symbol
 from src.utils.dotenv_loader import load_env
 from src.utils.alert_policy import DailyBudget, DecisionLogger, load_alert_policy_cfg, score_low_high
 from src.utils.cn_names import get_cn_name
+from src.server.data_bus import data_bus
+from src.server.monitor_server import start_monitor_server
 
 
 def _setup_logging(level: str) -> None:
@@ -49,6 +51,14 @@ def main() -> None:
         cfg = yaml.safe_load(f)
 
     _setup_logging(cfg.get("logging", {}).get("level", "INFO"))
+
+    # Start the monitor server in a background thread
+    monitor_cfg = cfg.get("monitor_server", {})
+    if monitor_cfg.get("enabled", True):
+        start_monitor_server(
+            host=monitor_cfg.get("host", "127.0.0.1"),
+            port=monitor_cfg.get("port", 18080),
+        )
 
     symbols = [normalize_symbol(s) for s in cfg.get("symbols", [])]
     poll_interval = int(cfg.get("poll_interval_seconds", 15))
@@ -155,6 +165,19 @@ def main() -> None:
 
             latest_bar = win[-1]
 
+            # Update monitoring data bus with the latest price snapshot
+            cn_name_for_bus = get_cn_name(sym) or ""
+            data_bus.update_snapshot(
+                sym,
+                name=cn_name_for_bus,
+                ts=latest_bar.ts,
+                close=float(latest_bar.close),
+                indicators=snap,
+                position_state=position_state_by_symbol.get(sym, "HOLDING_STOCK"),
+                t_share=float(t_share_by_symbol.get(sym, 0.0)),
+            )
+            data_bus.add_close_point(sym, latest_bar.ts, float(latest_bar.close))
+
             log.info(
                 "heartbeat %s: ts=%s close=%.3f dif=%.4f dea=%.4f hist=%.4f vol=%s vma=%s ma=%s source=%s",
                 sym,
@@ -228,6 +251,9 @@ def main() -> None:
                         t_share = float(t_share_by_symbol.get(sym, 0.0))
                         decision: LLMDecision = llm_decision(ctx, position_state=position_state, t_share=t_share)
                         llm_last_call_at[sym] = latest_bar.ts
+
+                        # Store decision in monitoring bus
+                        data_bus.add_decision(sym, decision)
 
                         cn_name_for_log = get_cn_name(sym)
                         name_tag = f"{cn_name_for_log} " if cn_name_for_log else ""
