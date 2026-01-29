@@ -26,7 +26,7 @@ def _summarize_series(values: List[float], n: int = 20) -> List[float]:
     return [float(v) for v in values[-n:]]
 
 
-def build_llm_payload(ctx: DecisionContext) -> Dict[str, Any]:
+def build_llm_payload(ctx: DecisionContext, position_state: str, t_share: float) -> Dict[str, Any]:
     ind = ctx.indicators
     payload: Dict[str, Any] = {
         "symbol": ctx.symbol,
@@ -46,17 +46,25 @@ def build_llm_payload(ctx: DecisionContext) -> Dict[str, Any]:
             "volumes": _summarize_series(ctx.recent_volumes, 20),
         },
         "rule_event": ctx.rule_event,
+        "trading_context": {
+            "base_share": 1.0,
+            "t_share": float(t_share),
+            "t_step": 0.5,
+            "t_share_min": -1.0,
+            "t_share_max": 1.0,
+            "position_state": position_state,
+        },
         "constraints": {
             "market": "A股",
             "timeframe": "1min",
             "mode": "只告警，不下单",
-            "allowed_actions": ["BUY_T", "SELL_T", "HOLD", "DISABLE_T"],
+            "allowed_actions": ["BUY_BACK", "SELL_PART", "HOLD_POSITION", "CANCEL_PLAN"],
         },
     }
     return payload
 
 
-def llm_decision(ctx: DecisionContext) -> LLMDecision:
-    payload = build_llm_payload(ctx)
+def llm_decision(ctx: DecisionContext, position_state: str, t_share: float) -> LLMDecision:
+    payload = build_llm_payload(ctx, position_state=position_state, t_share=t_share)
     return llm_decide(payload)
 

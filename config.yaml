@@ -1,5 +1,10 @@
 symbols:
+  - sz300308
+  - sz300502
+  - sz301486
+  - sz300058
   - sz300986
+  - sh688270
 poll_interval_seconds: 15
 window_size: 600
 agent:

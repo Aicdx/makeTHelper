@@ -9,9 +9,10 @@ from src.indicators.indicators import IndicatorSnapshot
 
 
 class SignalType(str, Enum):
-    BUY_T = "BUY_T"
-    SELL_T = "SELL_T"
-    DISABLE_T = "DISABLE_T"
+    BUY_BACK = "BUY_BACK"
+    SELL_PART = "SELL_PART"
+    HOLD_POSITION = "HOLD_POSITION"
+    CANCEL_PLAN = "CANCEL_PLAN"
     INFO = "INFO"
 
 
@@ -74,15 +75,15 @@ class SignalEngine:
     ) -> SignalEvent | None:
         st = self._get_state(symbol)
 
-        # Trend filter: if close below MA60, disable buy signals for T (still can emit SELL_T)
+        # Trend filter: if close below MA60, emit CANCEL_PLAN (risk-off)
         if self.enable_trend_filter and ind.ma_trend is not None:
             if close < ind.ma_trend:
-                if self._cooldown_ok(st, SignalType.DISABLE_T, ts):
-                    st.last_emit_at[SignalType.DISABLE_T] = ts
+                if self._cooldown_ok(st, SignalType.CANCEL_PLAN, ts):
+                    st.last_emit_at[SignalType.CANCEL_PLAN] = ts
                     return SignalEvent(
                         symbol=symbol,
                         ts=ts,
-                        signal=SignalType.DISABLE_T,
+                        signal=SignalType.CANCEL_PLAN,
                         reason=f"close<{ind.ma_trend:.3f} (MA{int(60)})",
                         dif=ind.dif,
                         dea=ind.dea,
@@ -100,9 +101,9 @@ class SignalEngine:
         # Detect crossing
         cross: SignalType | None = None
         if st.last_relation <= 0 and relation == 1:
-            cross = SignalType.BUY_T
+            cross = SignalType.BUY_BACK
         elif st.last_relation >= 0 and relation == -1:
-            cross = SignalType.SELL_T
+            cross = SignalType.SELL_PART
 
         st.last_relation = relation
 
@@ -129,7 +130,7 @@ class SignalEngine:
         if not self._cooldown_ok(st, cross, ts):
             return None
 
-        if cross == SignalType.BUY_T:
+        if cross == SignalType.BUY_BACK:
             if ind.vma is not None and ind.vol is not None:
                 if ind.vol < ind.vma * self.volume_multiplier:
                     # weak volume: emit INFO at most
@@ -154,7 +155,7 @@ class SignalEngine:
         st.pending_since = None
         st.pending_count = 0
 
-        reason = "MACD金叉确认" if cross == SignalType.BUY_T else "MACD死叉确认"
+        reason = "MACD金叉确认" if cross == SignalType.BUY_BACK else "MACD死叉确认"
         if ind.vma is not None and ind.vol is not None:
             reason += f"; vol={ind.vol:.0f}, vma={ind.vma:.0f}"
 

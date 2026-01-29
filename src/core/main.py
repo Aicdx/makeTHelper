@@ -18,6 +18,7 @@ from src.signals.signals import SignalEngine, SignalType
 from src.utils.symbols import normalize_symbol
 from src.utils.dotenv_loader import load_env
 from src.utils.alert_policy import DailyBudget, DecisionLogger, load_alert_policy_cfg, score_low_high
+from src.utils.cn_names import get_cn_name
 
 
 def _setup_logging(level: str) -> None:
@@ -78,6 +79,12 @@ def main() -> None:
 
     llm_last_call_at: dict[str, datetime] = {}
 
+    # Rolling T+0 state machine per symbol
+    # base_share=1.0 (底仓一份), t_share in [-1.0, +1.0] step=0.5
+    # total_position = 1.0 + t_share, so max position is 2.0 and min is 0.0
+    position_state_by_symbol: dict[str, str] = {sym: "HOLDING_STOCK" for sym in symbols}
+    t_share_by_symbol: dict[str, float] = {sym: 0.0 for sym in symbols}
+
     # Test mode: force exactly one LLM decision per symbol once we have enough data.
     test_llm_done: dict[str, bool] = {}
 
@@ -94,6 +101,16 @@ def main() -> None:
     test_mode = bool(agent_cfg.get("test_mode", False))
     test_force_llm = bool(agent_cfg.get("test_force_llm", False))
     heartbeat_every_loops = int(agent_cfg.get("heartbeat_every_loops", 1))
+
+    # Alert policy (trading hours / freshness / low-high score / daily budget + replacement / decision log)
+    policy = load_alert_policy_cfg(cfg)
+    decision_logger = DecisionLogger(log_dir=policy.log_dir, file_prefix=policy.log_file_prefix)
+    daily_budget = DailyBudget(
+        max_buy=policy.max_buy,
+        max_sell=policy.max_sell,
+        enable_replacement=policy.enable_replacement,
+        replace_min_improve_ratio=policy.replace_min_improve_ratio,
+    )
 
     if test_mode:
         log.warning("Test mode enabled: will run outside trading hours; test_force_llm=%s", test_force_llm)
@@ -185,7 +202,7 @@ def main() -> None:
             if event is None:
                 continue
 
-            if llm_enabled and event.signal in {SignalType.BUY_T, SignalType.SELL_T, SignalType.DISABLE_T, SignalType.INFO}:
+            if llm_enabled and event.signal in {SignalType.BUY_BACK, SignalType.SELL_PART, SignalType.CANCEL_PLAN, SignalType.HOLD_POSITION, SignalType.INFO}:
                 last_call = llm_last_call_at.get(sym)
                 bypass_throttle = test_mode and event.reason == "TEST_FORCE_LLM_ONCE"
                 if bypass_throttle:
@@ -207,38 +224,219 @@ def main() -> None:
                                 "data_source": source_tag,
                             },
                         )
-                        decision: LLMDecision = llm_decision(ctx)
+                        position_state = position_state_by_symbol.get(sym, "HOLDING_STOCK")
+                        t_share = float(t_share_by_symbol.get(sym, 0.0))
+                        decision: LLMDecision = llm_decision(ctx, position_state=position_state, t_share=t_share)
                         llm_last_call_at[sym] = latest_bar.ts
 
+                        cn_name_for_log = get_cn_name(sym)
+                        name_tag = f"{cn_name_for_log} " if cn_name_for_log else ""
                         log.info(
-                            "LLM decision for %s: action=%s conf=%.2f reasons=%s risks=%s plan=%s",
+                            "LLM decision for %s%s: action=%s state=%s conf=%.2f reasons=%s risks=%s plan=%s next=%s",
+                            name_tag,
                             sym,
                             decision.action,
+                            decision.position_state,
                             decision.confidence,
                             "; ".join(decision.reasons[:3]),
                             "; ".join(decision.risks[:3]),
-                            "; ".join(decision.suggested_plan[:3]),
+                            "; ".join([
+                                f"target={decision.operation_plan.get('target_price')} stop={decision.operation_plan.get('stop_price')} share={decision.operation_plan.get('suggested_share')} window={decision.operation_plan.get('time_window')}"
+                            ]),
+                            "; ".join(decision.next_decision_point[:3]),
                         )
 
-                        reason_prefix = f"LLM action={decision.action} conf={decision.confidence:.2f}"
+                        # === alert policy: trading hours / freshness / low-high score / daily budget + replacement / decision log ===
+                        in_trading_hours = _is_trading_time_cn(now)
+                        data_age_s = (now - latest_bar.ts).total_seconds()
+                        is_fresh = data_age_s <= float(policy.max_data_age_seconds)
+
+                        # Update rolling T+0 state machine (scheme C)
+                        # base_share=1.0, t_share in [-1.0, +1.0] step=0.5
+                        # total_position = 1.0 + t_share
+                        exec_share = 1.0 if float(decision.confidence) >= 0.8 else 0.5
+
+                        def _clamp(v: float, lo: float, hi: float) -> float:
+                            return max(lo, min(hi, v))
+
+                        cur_t = float(t_share_by_symbol.get(sym, 0.0))
+
+                        if decision.action == "SELL_PART":
+                            # 卖出：减少总仓位 -> t_share 变小
+                            new_t = _clamp(cur_t - exec_share, -1.0, 1.0)
+                            t_share_by_symbol[sym] = new_t
+                        elif decision.action == "BUY_BACK":
+                            # 买回：增加总仓位 -> t_share 变大
+                            new_t = _clamp(cur_t + exec_share, -1.0, 1.0)
+                            t_share_by_symbol[sym] = new_t
+                        elif decision.action == "CANCEL_PLAN":
+                            # 回归初始底仓状态
+                            t_share_by_symbol[sym] = 0.0
+
+                        # 根据 t_share 决定状态（边界值更明确）
+                        cur_t2 = float(t_share_by_symbol.get(sym, 0.0))
+                        if cur_t2 <= -0.999:
+                            position_state_by_symbol[sym] = "HOLDING_CASH"
+                        elif cur_t2 >= 0.999:
+                            position_state_by_symbol[sym] = "HOLDING_STOCK"
+                        else:
+                            # 中间态：既可买也可卖，这里保留 HOLDING_STOCK 作为默认
+                            position_state_by_symbol[sym] = "HOLDING_STOCK"
+
+                        action_side = "BUY" if decision.action == "BUY_BACK" else ("SELL" if decision.action == "SELL_PART" else None)
+
+                        score = None
+                        score_breakdown = None
+                        score_features = None
+                        accepted = None
+                        replaced = None
+                        should_emit = True
+                        skip_reason = None
+
+                        if policy.trading_hours_only and not in_trading_hours:
+                            should_emit = False
+                            skip_reason = "outside_trading_hours"
+
+                        if should_emit and not is_fresh:
+                            should_emit = False
+                            skip_reason = "stale_data"
+
+                        if action_side in {"BUY", "SELL"}:
+                            score, score_breakdown, score_features = score_low_high(
+                                side=action_side,
+                                closes=closes,
+                                snap=snap,
+                                lookback=policy.lookback_bars,
+                                near_extreme_ratio=policy.near_extreme_ratio,
+                                volume_multiplier_buy=policy.volume_multiplier_buy,
+                                hist_series=None,
+                            )
+                            w = policy.score_weights
+                            final_score = (
+                                float(score_breakdown.price_position) * float(w.get("price_position", 0.0))
+                                + float(score_breakdown.macd_momentum) * float(w.get("macd_momentum", 0.0))
+                                + float(score_breakdown.volume) * float(w.get("volume", 0.0))
+                                + float(score_breakdown.ma_trend) * float(w.get("ma_trend", 0.0))
+                            )
+                            score = max(0.0, min(1.0, float(final_score)))
+
+                            candidate = {
+                                "symbol": sym,
+                                "bar_ts": latest_bar.ts.isoformat(timespec="seconds"),
+                                "price": float(latest_bar.close),
+                                "action": action_side,
+                                "score": float(score),
+                                "llm_conf": float(decision.confidence),
+                            }
+
+                            accepted, replaced = daily_budget.consider(action_side, candidate)
+                            if not accepted:
+                                should_emit = False
+                                skip_reason = "budget_not_selected"
+
+                        # Always write decision log (append, never overwrite)
+                        cn_name = get_cn_name(sym)
+                        decision_logger.append(
+                            {
+                                "ts_now": now.isoformat(timespec="seconds"),
+                                "bar_ts": latest_bar.ts.isoformat(timespec="seconds"),
+                                "symbol": sym,
+                                "name": cn_name,
+                                "data_source": source_tag,
+                                "in_trading_hours": in_trading_hours,
+                                "data_age_seconds": data_age_s,
+                                "is_fresh": is_fresh,
+                                "rule_event": {"signal": event.signal.value, "reason": event.reason},
+                                "llm": {
+                                    "action": decision.action,
+                                    "confidence": float(decision.confidence),
+                                    "reasons": decision.reasons,
+                                    "risks": decision.risks,
+                                    "position_state": decision.position_state,
+                                    "t_share": float(t_share_by_symbol.get(sym, 0.0)),
+                                    "total_share": 1.0 + float(t_share_by_symbol.get(sym, 0.0)),
+                                    "operation_plan": decision.operation_plan,
+                                    "next_decision_point": decision.next_decision_point,
+                                },
+                                "policy": {
+                                    "trading_hours_only": policy.trading_hours_only,
+                                    "max_data_age_seconds": policy.max_data_age_seconds,
+                                    "lookback_bars": policy.lookback_bars,
+                                    "budget": daily_budget.snapshot(),
+                                },
+                                "score": {
+                                    "action_side": action_side,
+                                    "value": score,
+                                    "breakdown": (
+                                        {
+                                            "price_position": score_breakdown.price_position,
+                                            "macd_momentum": score_breakdown.macd_momentum,
+                                            "volume": score_breakdown.volume,
+                                            "ma_trend": score_breakdown.ma_trend,
+                                        }
+                                        if score_breakdown is not None
+                                        else None
+                                    ),
+                                    "features": score_features,
+                                },
+                                "budget_decision": {
+                                    "accepted": accepted,
+                                    "replaced": replaced,
+                                },
+                                "emit": {
+                                    "should_emit": should_emit,
+                                    "skip_reason": skip_reason,
+                                },
+                            }
+                        )
+
+                        if not should_emit:
+                            log.info(
+                                "alert skipped %s %s action=%s conf=%.2f score=%s reason=%s",
+                                sym,
+                                latest_bar.ts.strftime("%Y-%m-%d %H:%M"),
+                                decision.action,
+                                decision.confidence,
+                                (f"{score:.3f}" if isinstance(score, float) else "NA"),
+                                skip_reason,
+                            )
+                            continue
+
+                        cn_name_for_reason = cn_name or ""
+                        name_part = f"{cn_name_for_reason} " if cn_name_for_reason else ""
+                        reason_prefix = f"{name_part}LLM action={decision.action} conf={decision.confidence:.2f}"
                         if decision.confidence < llm_min_conf:
                             reason_prefix += " (low_conf)"
+                        if action_side in {"BUY", "SELL"} and isinstance(score, float):
+                            reason_prefix += f" score={score:.3f}"
 
+                        # 将新动作映射到 SignalType（已升级为新枚举）
+                        signal_type = SignalType.INFO
+                        if decision.action == "BUY_BACK":
+                            signal_type = SignalType.BUY_BACK
+                        elif decision.action == "SELL_PART":
+                            signal_type = SignalType.SELL_PART
+                        elif decision.action == "CANCEL_PLAN":
+                            signal_type = SignalType.CANCEL_PLAN
+                        elif decision.action == "HOLD_POSITION":
+                            signal_type = SignalType.HOLD_POSITION
+                            
+                        # 构建详细原因，包含仓位信息
+                        position_info = f"[总仓={1.0 + float(t_share_by_symbol.get(sym, 0.0)):.1f} t_share={float(t_share_by_symbol.get(sym, 0.0)):+.1f}]"
+                        full_reason = f"{reason_prefix} {position_info}; " + "; ".join(decision.reasons[:4])
+                        
                         emit(
                             event.__class__(
                                 symbol=sym,
                                 ts=latest_bar.ts,
-                                signal=SignalType(decision.action)
-                                if decision.action in {"BUY_T", "SELL_T", "DISABLE_T"}
-                                else SignalType.INFO,
-                                reason=f"{reason_prefix}; reasons="
-                                + "; ".join(decision.reasons[:6]),
-                                dif=event.dif,
-                                dea=event.dea,
-                                hist=event.hist,
-                                vol=event.vol,
-                                vma=event.vma,
-                                close=event.close,
+                                signal=signal_type,
+                                reason=full_reason,
+                                dif=snap.dif,
+                                dea=snap.dea,
+                                hist=snap.hist,
+                                vol=snap.vol,
+                                vma=snap.vma,
+                                close=latest_bar.close,
                             )
                         )
                     except Exception as e:

@@ -22,11 +22,13 @@ from src.indicators.types import Bar
 
 
 class AgentDecision(BaseModel):
-    action: str = Field(..., description="BUY_T/SELL_T/HOLD/DISABLE_T")
+    action: str = Field(..., description="BUY_BACK/SELL_PART/HOLD_POSITION/CANCEL_PLAN")
+    position_state: str = Field(..., description="HOLDING_CASH/HOLDING_STOCK")
     confidence: float = Field(..., ge=0.0, le=1.0)
+    operation_plan: Dict[str, Any] = Field(default_factory=dict)
     reasons: List[str] = Field(default_factory=list)
     risks: List[str] = Field(default_factory=list)
-    suggested_plan: List[str] = Field(default_factory=list, description="建议的操作步骤（只告警，不下单）")
+    next_decision_point: List[str] = Field(default_factory=list)
 
 
 @tool
@@ -94,11 +96,12 @@ def _agent_prompt() -> str:
         "你会收到：分钟K线摘要、MACD/均线/量能指标、以及规则触发的候选信号（如金叉/死叉/趋势禁做T）。\n"
         "你的任务：输出一个严格JSON对象，符合给定schema（action/confidence/reasons/risks/suggested_plan）。\n"
         "要求：\n"
-        "- action 只能是 BUY_T/SELL_T/HOLD/DISABLE_T\n"
+        "- action 只能是 BUY_BACK/SELL_PART/HOLD_POSITION/CANCEL_PLAN\n"
         "- reasons 3~8条，必须引用输入中的具体数值/现象（例如 close 与 MA60、dif/dea/hist、量能对比等）\n"
         "- risks 2~6条，提醒可能的失败情形（假信号、缩量、趋势下行、数据延迟等）\n"
-        "- suggested_plan 3~8条，给出‘只告警’的执行建议（例如等待确认/设定冷却/观察量能/分批做T等）\n"
-        "- 若数据不足或源不稳定，优先输出 HOLD 或 DISABLE_T，并在 risks 中说明\n"
+        "- operation_plan 给出 target_price/stop_price/suggested_share(0.5或1.0)/time_window\n"
+        "- next_decision_point 2~4条，说明下一步验证条件\n"
+        "- 若数据不足或源不稳定，优先输出 HOLD_POSITION 或 CANCEL_PLAN，并在 risks 中说明\n"
     )
 
 
@@ -115,7 +118,7 @@ def _print_heartbeat(sym: str, latest_bar: Bar, snap: Any, source_tag: str) -> N
 
 
 def _print_alert_summary(sym: str, decision_obj: Dict[str, Any], ctx: Dict[str, Any]) -> None:
-    action = decision_obj.get("action", "HOLD")
+    action = decision_obj.get("action", "HOLD_POSITION")
     conf = decision_obj.get("confidence", "?")
     reasons = decision_obj.get("reasons", [])
     risks = decision_obj.get("risks", [])

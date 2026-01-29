@@ -81,6 +81,7 @@ def score_low_high(
     snap: IndicatorSnapshot,
     lookback: int,
     near_extreme_ratio: float,
+    volume_multiplier_buy: float,
     hist_series: Optional[List[float]] = None,
 ) -> Tuple[float, ScoreBreakdown, Dict[str, Any]]:
     """低点/高点评分：返回(score 0~1, 分项, 额外特征)."""
@@ -145,8 +146,9 @@ def score_low_high(
     if snap.vol is not None and snap.vma is not None and snap.vma > 0:
         ratio = float(snap.vol) / float(snap.vma)
         if side == "BUY":
-            # BUY 更偏好放量（>=1.2倍附近达到满分）
-            vol_score = _clamp01(ratio / 1.2)
+            # BUY 更偏好放量（>= volume_multiplier_buy 倍附近达到满分）
+            vm = max(1e-6, float(volume_multiplier_buy))
+            vol_score = _clamp01(ratio / vm)
         else:
             # SELL 只要不太弱（>=均量接近满分）
             vol_score = _clamp01(ratio / 1.0)
