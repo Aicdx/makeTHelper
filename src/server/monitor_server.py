@@ -8,11 +8,14 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from .data_bus import SymbolSnapshot, data_bus
+from src.server.shared_state import bar_store
+
+from .data_bus import SymbolSnapshot
+from src.server.shared_state import data_bus
 
 
 class SymbolSummary(BaseModel):
@@ -28,7 +31,7 @@ class SymbolSummary(BaseModel):
 
 
 class DecisionPoint(BaseModel):
-    ts: datetime
+    ts: str
     action: str
     confidence: float
     reasons: List[str]
@@ -65,7 +68,6 @@ class ConnectionManager:
                 self.active_connections.remove(websocket)
 
     async def broadcast(self, message: str):
-        # Copy connections under lock, then send without holding the lock
         with self._lock:
             connections = list(self.active_connections)
 
@@ -86,7 +88,6 @@ class ConnectionManager:
 app = FastAPI(title="Trading Monitor API", version="0.1.0")
 manager = ConnectionManager()
 
-# CORS middleware to allow requests from the frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -130,8 +131,9 @@ async def get_symbol_detail(symbol: str):
     for decision in snapshot.decision_history:
         decisions.append(
             {
+                "ts": decision.ts.isoformat(),
                 "action": decision.action,
-                "confidence": decision.confidence,
+                "confidence": float(decision.confidence),
                 "reasons": decision.reasons,
                 "risks": decision.risks,
                 "operation_plan": decision.operation_plan,
@@ -158,16 +160,50 @@ async def get_series(symbol: str):
     ]
 
 
+@app.get("/api/full_series/{symbol}")
+async def get_full_series(symbol: str, limit: int = Query(800, ge=1, le=5000)):
+    """Return full intraday 1-min OHLC series for the given symbol.
+
+    Data source: BarStore from the running main process (shared_state.bar_store).
+    """
+    if bar_store is None:
+        return {"error": "bar_store_not_ready"}
+
+    win = bar_store.get_window(symbol, int(limit))
+    if not win:
+        return []
+
+    # Filter to today's bars in local timezone
+    today = datetime.now().date()
+    out = []
+    for b in win:
+        try:
+            if b.ts.date() != today:
+                continue
+            out.append(
+                {
+                    "ts": b.ts.isoformat(timespec="seconds"),
+                    "open": float(b.open),
+                    "high": float(b.high),
+                    "low": float(b.low),
+                    "close": float(b.close),
+                    "volume": float(getattr(b, "volume", 0.0) or 0.0),
+                }
+            )
+        except Exception:
+            continue
+
+    return out
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     try:
-        # Send an initial snapshot so the client can render immediately
         snapshots = data_bus.get_all_snapshots()
         updates = [snapshot_to_summary(s) for s in snapshots]
         await websocket.send_text(json.dumps({"type": "update", "data": updates}))
 
-        # Keep connection alive; client may send pings
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
@@ -198,11 +234,6 @@ def _port_in_use(host: str, port: int) -> bool:
 
 
 def start_monitor_server(host: str = "127.0.0.1", port: int = 18080) -> Optional[threading.Thread]:
-    """Start the monitor server in a background daemon thread.
-
-    - If the port is already in use, this function will skip starting a new server.
-    - This avoids blocking the main trading loop and avoids port conflicts.
-    """
     if _port_in_use(host, port):
         print(f"Monitor server already running at http://{host}:{port} (skip start)")
         return None

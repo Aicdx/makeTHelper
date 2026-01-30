@@ -78,7 +78,3 @@ class DataBus:
     def get_snapshot(self, symbol: str) -> Optional[SymbolSnapshot]:
         with self._lock:
             return self._snapshots.get(symbol)
-
-
-# Global instance to be shared between the main loop and the server
-data_bus = DataBus()

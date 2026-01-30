@@ -75,23 +75,6 @@ class SignalEngine:
     ) -> SignalEvent | None:
         st = self._get_state(symbol)
 
-        # Trend filter: if close below MA60, emit CANCEL_PLAN (risk-off)
-        if self.enable_trend_filter and ind.ma_trend is not None:
-            if close < ind.ma_trend:
-                if self._cooldown_ok(st, SignalType.CANCEL_PLAN, ts):
-                    st.last_emit_at[SignalType.CANCEL_PLAN] = ts
-                    return SignalEvent(
-                        symbol=symbol,
-                        ts=ts,
-                        signal=SignalType.CANCEL_PLAN,
-                        reason=f"close<{ind.ma_trend:.3f} (MA{int(60)})",
-                        dif=ind.dif,
-                        dea=ind.dea,
-                        hist=ind.hist,
-                        vol=ind.vol,
-                        vma=ind.vma,
-                        close=close,
-                    )
 
         relation = 1 if ind.dif > ind.dea else (-1 if ind.dif < ind.dea else 0)
         if st.last_relation is None:

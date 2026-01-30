@@ -46,6 +46,16 @@ def build_llm_payload(ctx: DecisionContext, position_state: str, t_share: float)
             "volumes": _summarize_series(ctx.recent_volumes, 20),
         },
         "rule_event": ctx.rule_event,
+        "trend_context": {
+            "ma_trend": float(ind.ma_trend) if ind.ma_trend is not None else None,
+            "close": float(ctx.close),
+            "above_ma_trend": (float(ctx.close) >= float(ind.ma_trend)) if ind.ma_trend is not None else None,
+            "ma_distance_ratio": (
+                (float(ctx.close) - float(ind.ma_trend)) / float(ind.ma_trend)
+                if ind.ma_trend is not None and float(ind.ma_trend) != 0.0
+                else None
+            ),
+        },
         "trading_context": {
             "base_share": 1.0,
             "t_share": float(t_share),
@@ -66,5 +76,5 @@ def build_llm_payload(ctx: DecisionContext, position_state: str, t_share: float)
 
 def llm_decision(ctx: DecisionContext, position_state: str, t_share: float) -> LLMDecision:
     payload = build_llm_payload(ctx, position_state=position_state, t_share=t_share)
-    return llm_decide(payload)
+    return llm_decide(payload, ts=ctx.ts)
 

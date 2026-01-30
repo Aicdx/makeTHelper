@@ -32,7 +32,7 @@ class LLMError(Exception):
 
 class LLMClient:
     """A more robust HTTP client with retry logic and error handling."""
-    
+
     def __init__(
         self,
         base_url: str,
@@ -48,10 +48,10 @@ class LLMClient:
         self.max_retries = max(0, max_retries)
         self.initial_retry_delay = max(0.1, initial_retry_delay)
         self.timeout = max(5, timeout)
-        
+
     def _make_request(
-        self, 
-        payload: Dict[str, Any], 
+        self,
+        payload: Dict[str, Any],
         path: str = "/chat/completions"
     ) -> Dict[str, Any]:
         """Make an HTTP request with retry logic and error handling."""
@@ -60,12 +60,12 @@ class LLMClient:
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}",
         }
-        
+
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-        
+
         last_error = None
-        
+
         for attempt in range(self.max_retries + 1):
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
@@ -80,7 +80,7 @@ class LLMClient:
                             raise LLMError(f"Server error: {error_msg}", LLMErrorType.NETWORK, True)
                         else:
                             raise LLMError(f"Request failed: {error_msg}", LLMErrorType.UNKNOWN, False)
-                            
+
             except urllib.error.URLError as e:
                 if isinstance(e, urllib.error.HTTPError and e.code == 429):
                     error = LLMError("Rate limit exceeded", LLMErrorType.RATE_LIMIT, True)
@@ -89,15 +89,15 @@ class LLMClient:
                 else:
                     error = LLMError(f"Network error: {e}", LLMErrorType.NETWORK, True)
                 last_error = error
-                
+
             except json.JSONDecodeError as e:
                 last_error = LLMError("Invalid JSON response", LLMErrorType.INVALID_RESPONSE, False)
                 break  # Don't retry on JSON decode errors
-                
+
             except Exception as e:
                 last_error = LLMError(f"Unexpected error: {e}", LLMErrorType.UNKNOWN, False)
                 break  # Don't retry on unknown errors
-            
+
             # If we get here, we should retry
             if attempt < self.max_retries and last_error.retryable:
                 delay = self.initial_retry_delay * (2 ** attempt)  # Exponential backoff
@@ -105,13 +105,14 @@ class LLMClient:
                 continue
             else:
                 break
-        
+
         # If we've exhausted retries or hit a non-retryable error
         raise last_error or LLMError("Unknown error occurred", LLMErrorType.UNKNOWN, False)
 
 
 @dataclass(frozen=True)
 class LLMDecision:
+    ts: datetime
     action: str  # BUY_BACK / SELL_PART / HOLD_POSITION / CANCEL_PLAN
     position_state: str  # HOLDING_CASH / HOLDING_STOCK
     confidence: float
@@ -157,10 +158,10 @@ def _create_llm_client() -> LLMClient:
     api_base = _env("LLM_API_BASE", "https://api.openai.com/v1")
     api_key = _env("LLM_API_KEY")
     model = _env("LLM_MODEL", "gpt-4o-mini")
-    
+
     if not api_key:
         raise RuntimeError("LLM_API_KEY is not set in environment variables")
-    
+
     return LLMClient(
         base_url=api_base,
         api_key=api_key,
@@ -171,27 +172,27 @@ def _create_llm_client() -> LLMClient:
     )
 
 
-def decide(payload: Dict[str, Any]) -> LLMDecision:
+def decide(payload: Dict[str, Any], ts: datetime) -> LLMDecision:
     """Get a trading decision from an LLM with enhanced reliability.
-    
+
     This function uses the LLMClient to make requests with retries and proper error handling.
-    
+
     Environment variables:
       - LLM_API_BASE: e.g. https://api.openai.com/v1 (or other compatible)
       - LLM_API_KEY: Your API key for the LLM service
       - LLM_MODEL: (optional) Model name, defaults to "gpt-4o-mini"
-      
+
     Args:
         payload: Input data for the LLM decision
-        
+
     Returns:
         LLMDecision: The parsed decision from the LLM
-        
+
     Raises:
         LLMError: If the request fails after all retries or encounters a non-retryable error
     """
     client = _create_llm_client()
-    
+
     system_prompt = """# A股底仓滚动做T决策引擎
 
 ## 核心定位
@@ -214,6 +215,14 @@ def decide(payload: Dict[str, Any]) -> LLMDecision:
 
 ## 输入数据处理要求
 必须严格基于提供的结构化数据，重点关注：
+
+### 趋势上下文（trend_context）说明（重要）
+输入中会包含 `trend_context`（例如 MA60、是否在MA上方、偏离比例等）。
+- `trend_context` **只用于风险参考，不是硬性禁做规则**。
+- 即使 `close < ma_trend`（弱势），仍可能出现可执行的滚动做T机会：
+  - 反弹到压力位可执行 `SELL_PART`（更偏安全、顺势减仓/降风险）。
+  - 若出现明确止跌/反转结构且盈亏比与量能满足，也可小仓位 `BUY_BACK`（需在 risks 强调逆势风险）。
+- 你必须在 reasons/risks 中显式引用 `trend_context.ma_trend` 与 `trend_context.above_ma_trend`（如果提供）。
 1. **持仓状态标记**：当前处于「持币等买」还是「持股等卖」状态？这是决策起点。
 2. **价格与波动**：日内高低点、当前价相对于日内区间的分位（如：处于日内区间的70%高位）。
 3. **关键技术位**：分时均线、前高/前低、整数关口、日内关键成交密集区。
@@ -253,7 +262,8 @@ def decide(payload: Dict[str, Any]) -> LLMDecision:
 3. operation_plan（操作计划详情）
    - target_price：建议执行价格（买回价或卖出价）。
    - stop_price：计划失效价格（如买回时价格继续下跌，或卖出时价格继续上涨的确认点）。
-   - suggested_share：建议操作仓位比例，基于1/2或1/3的底仓滚动逻辑。
+   - target_price / stop_price：**若 action 为 BUY_BACK/SELL_PART，这两个价格必须 > 0，否则应输出 HOLD_POSITION**。
+   - suggested_share：建议操作仓位比例（0.5 或 1.0）。
    - time_window：建议操作的时间窗口。
 
 4. confidence（信心度：0-1）
@@ -301,30 +311,10 @@ def decide(payload: Dict[str, Any]) -> LLMDecision:
      - 强势单边上涨：减少卖出，只做回调买回，避免卖飞。
      - 弱势单边下跌：减少买入，只做反弹卖出，避免套牢。
 
-## 典型场景决策流程
-### 场景A：【持币等卖后，寻找买回点】
-- 输入状态：`position_state: "HOLDING_CASH"`（已在上午11.00元卖出1/3底仓）
-- 分析逻辑：
-  1. 计算理想买回价：11.00 × (1 - 1.5%) = 10.84元（最小盈利空间）
-  2. 寻找技术支撑：日内前低10.80元、分时均线10.78元
-  3. 等待企稳信号：在支撑位出现缩量十字星、MACD底背离等
-- 决策输出：若价格到达10.80-10.85区间且出现企稳信号，则`action: "BUY_BACK"`
-
-### 场景B：【持股等买后，寻找卖出点】
-- 输入状态：`position_state: "HOLDING_STOCK"`（已在上午10.50元买入1/3仓位）
-- 分析逻辑：
-  1. 计算理想卖出价：10.50 × (1 + 1.5%) = 10.66元（最小盈利空间）
-  2. 寻找技术压力：前高10.70元、日内涨幅2%位置10.71元
-  3. 等待滞涨信号：在压力位出现放量不涨、长上影线等
-- 决策输出：若价格到达10.66-10.72区间且出现滞涨信号，则`action: "SELL_PART"`
-
 ## 特殊处理
 - 开盘剧烈波动（前15分钟）：建议观察，不轻易开新循环。
 - 盘中突发利好/利空：重新评估所有未完成循环，可能需CANCEL_PLAN。
 - 成交量极度萎缩（低于均量40%）：建议暂停滚动，流动性不足易被操纵。
-- 持仓成本提示：如果输入中提供了持仓成本价，在决策时应考虑：
-  - 若现价远高于成本，可适当放宽卖出条件（避免贪婪）
-  - 若现价接近或低于成本，需更谨慎，避免扩大亏损
 
 ## 最后铁律
 1. 永远知道自己在哪个状态（持币还是持股）
@@ -332,30 +322,26 @@ def decide(payload: Dict[str, Any]) -> LLMDecision:
 3. 不因小利开仓，不因小亏死扛
 4. 日内了结，不把T做成加仓
 """
-    
+
     try:
-        # Make the request with retry logic handled by LLMClient
         response = client._make_request({
             "model": client.model,
             "temperature": 0.2,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {
-                    "role": "user", 
+                    "role": "user",
                     "content": json.dumps({
-                        "task": "根据分钟级指标决定是否给出做T的买入/卖出告警",
+                        "task": "根据分钟级指标与滚动做T仓位状态，给出 BUY_BACK/SELL_PART/HOLD_POSITION/CANCEL_PLAN 的告警决策",
                         "input": payload,
                     }, ensure_ascii=False)
                 },
             ],
             "response_format": {"type": "json_object"},
         })
-        
-        # Extract and validate the response
+
         content = response["choices"][0]["message"]["content"]
         obj = _extract_json(content)
-        
-        # --- New Parsing Logic for Rolling T+0 Strategy ---
 
         def clean_string_list(value, default=None):
             if default is None:
@@ -364,17 +350,14 @@ def decide(payload: Dict[str, Any]) -> LLMDecision:
                 value = [str(value)] if value is not None else default
             return [str(item).strip() for item in value if str(item).strip()]
 
-        # 1. Parse and validate `action`
         action = str(obj.get("action", "HOLD_POSITION")).upper()
         if action not in {"BUY_BACK", "SELL_PART", "HOLD_POSITION", "CANCEL_PLAN"}:
-            action = "HOLD_POSITION"  # Default to holding
+            action = "HOLD_POSITION"
 
-        # 2. Parse and validate `position_state`
         position_state = str(obj.get("position_state", "HOLDING_STOCK")).upper()
         if position_state not in {"HOLDING_CASH", "HOLDING_STOCK"}:
-            position_state = "HOLDING_STOCK" # Default to holding stock
+            position_state = "HOLDING_STOCK"
 
-        # 3. Parse and validate `confidence`
         confidence = obj.get("confidence", 0.5)
         try:
             confidence = float(confidence)
@@ -382,27 +365,41 @@ def decide(payload: Dict[str, Any]) -> LLMDecision:
             confidence = 0.5
         confidence = max(0.0, min(1.0, confidence))
 
-        # 4. Parse and validate `operation_plan`
         operation_plan = obj.get("operation_plan")
         if not isinstance(operation_plan, dict):
             operation_plan = {}
+
+        def _as_float(x: Any, default: float = 0.0) -> float:
+            try:
+                return float(x)
+            except Exception:
+                return float(default)
+
         operation_plan = {
-            "target_price": float(operation_plan.get("target_price", 0.0)),
-            "stop_price": float(operation_plan.get("stop_price", 0.0)),
-            "suggested_share": str(operation_plan.get("suggested_share", "N/A")),
-            "time_window": str(operation_plan.get("time_window", "N/A")),
+            "target_price": _as_float(operation_plan.get("target_price", 0.0), 0.0),
+            "stop_price": _as_float(operation_plan.get("stop_price", 0.0), 0.0),
+            "suggested_share": str(operation_plan.get("suggested_share", "0.5")),
+            "time_window": str(operation_plan.get("time_window", "")),
         }
 
-        # 5. Parse `reasons`, `risks`, `next_decision_point`
         reasons = clean_string_list(obj.get("reasons"), ["No reasons provided"])[:8]
         risks = clean_string_list(obj.get("risks"), ["No specific risks identified"])[:6]
         next_decision_point = clean_string_list(obj.get("next_decision_point"), [])[:5]
 
-        # Backward compatibility for old field names, if model returns them
         if not next_decision_point and obj.get("next_check_points"):
             next_decision_point = clean_string_list(obj.get("next_check_points"), [])[:5]
 
+        # Enforce executable plan: BUY_BACK/SELL_PART must include valid target/stop prices
+        if action in {"BUY_BACK", "SELL_PART"}:
+            tp = float(operation_plan.get("target_price", 0.0) or 0.0)
+            sp = float(operation_plan.get("stop_price", 0.0) or 0.0)
+            if tp <= 0.0 or sp <= 0.0:
+                action = "HOLD_POSITION"
+                confidence = min(confidence, 0.4)
+                risks = (risks + ["模型未给出有效的target_price/stop_price（>0），为避免不可执行信号，已将动作降级为HOLD_POSITION。"])[:10]
+
         return LLMDecision(
+            ts=ts,
             action=action,
             position_state=position_state,
             confidence=confidence,
@@ -411,17 +408,9 @@ def decide(payload: Dict[str, Any]) -> LLMDecision:
             risks=risks,
             next_decision_point=next_decision_point,
         )
-        
+
     except Exception as e:
-        # If we get here, all retries have been exhausted or we hit a non-retryable error
         error_msg = f"Failed to get LLM decision after retries: {str(e)}"
         if isinstance(e, LLMError):
-            raise  # Re-raise our custom errors as-is
-        else:
-            # Wrap unexpected errors in our custom error type
-            raise LLMError(
-                error_msg,
-                LLMErrorType.UNKNOWN,
-                False  # Don't retry on unknown errors
-            ) from e
-
+            raise
+        raise LLMError(error_msg, LLMErrorType.UNKNOWN, False) from e

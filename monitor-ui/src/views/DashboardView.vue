@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
-import { useMonitorStore } from '../stores/monitor'
 import PriceChart from '../components/PriceChart.vue'
+import { useMonitorStore } from '../stores/monitor'
 
 const store = useMonitorStore()
 
@@ -17,10 +17,7 @@ const filteredSymbols = computed(() => {
   return store.symbols
     .filter((s) => {
       if (!kw) return true
-      return (
-        s.symbol.toLowerCase().includes(kw) ||
-        (s.name || '').toLowerCase().includes(kw)
-      )
+      return s.symbol.toLowerCase().includes(kw) || (s.name || '').toLowerCase().includes(kw)
     })
     .filter((s) => {
       if (!act) return true
@@ -35,6 +32,49 @@ function closeDrawer() {
   store.selectedSymbol = null
   store.selectedDetail = null
 }
+
+const latestDecision = computed(() => store.selectedDetail?.decisions?.[0] || null)
+
+function _safeNum(x: unknown, d = 0): number {
+  const n = Number(x)
+  return Number.isFinite(n) ? n : d
+}
+
+const targetDistance = computed(() => {
+  const price = _safeNum(store.selectedSummary?.close, 0)
+  const target = _safeNum(latestDecision.value?.operation_plan?.target_price, 0)
+  if (!target || target <= 0) return null
+  const diff = price - target
+  const pct = (diff / target) * 100
+  return { price, target, diff, pct }
+})
+
+const stopDistance = computed(() => {
+  const price = _safeNum(store.selectedSummary?.close, 0)
+  const stop = _safeNum(latestDecision.value?.operation_plan?.stop_price, 0)
+  if (!stop || stop <= 0) return null
+  const diff = price - stop
+  const pct = (diff / stop) * 100
+  return { price, stop, diff, pct }
+})
+
+const targetDistanceClass = computed(() => {
+  const d = targetDistance.value
+  if (!d) return 'text-slate-300'
+  // 越接近 0 越“快到了”，用更亮的颜色提示
+  if (Math.abs(d.pct) <= 0.3) return 'text-emerald-300'
+  if (Math.abs(d.pct) <= 1.0) return 'text-emerald-200'
+  return 'text-slate-300'
+})
+
+const stopDistanceClass = computed(() => {
+  const d = stopDistance.value
+  if (!d) return 'text-slate-300'
+  // 越接近止损(0)越危险，显示更红
+  if (Math.abs(d.pct) <= 0.3) return 'text-rose-300'
+  if (Math.abs(d.pct) <= 1.0) return 'text-rose-200'
+  return 'text-slate-300'
+})
 
 let detailTimer: number | null = null
 
@@ -97,7 +137,10 @@ watch(
     </header>
 
     <main class="mx-auto max-w-7xl px-4 py-6">
-      <div v-if="store.lastError" class="mb-4 rounded-lg border border-rose-800 bg-rose-950/40 p-3 text-sm text-rose-200">
+      <div
+        v-if="store.lastError"
+        class="mb-4 rounded-lg border border-rose-800 bg-rose-950/40 p-3 text-sm text-rose-200"
+      >
         {{ store.lastError }}
       </div>
 
@@ -180,13 +223,20 @@ watch(
       <!-- Drawer -->
       <div v-if="drawerOpen" class="fixed inset-0 z-30">
         <div class="absolute inset-0 bg-black/60" @click="closeDrawer" />
-        <div class="absolute right-0 top-0 h-full w-full max-w-2xl overflow-y-auto border-l border-slate-800 bg-slate-950">
+        <div
+          class="absolute right-0 top-0 h-full w-full max-w-2xl overflow-y-auto border-l border-slate-800 bg-slate-950"
+        >
           <div class="flex items-center justify-between border-b border-slate-800 px-4 py-4">
             <div>
               <div class="font-mono text-sm text-slate-300">{{ store.selectedSymbol }}</div>
-              <div class="text-lg font-semibold">{{ store.selectedDetail?.name || store.selectedSummary?.name }}</div>
+              <div class="text-lg font-semibold">
+                {{ store.selectedDetail?.name || store.selectedSummary?.name }}
+              </div>
             </div>
-            <button class="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm hover:bg-slate-900" @click="closeDrawer">
+            <button
+              class="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm hover:bg-slate-900"
+              @click="closeDrawer"
+            >
               关闭
             </button>
           </div>
@@ -208,11 +258,24 @@ watch(
               <div class="rounded-lg border border-slate-800 bg-slate-900/30 p-3">
                 <div class="text-xs text-slate-400">操作计划（最新一条）</div>
                 <div class="mt-2 text-sm text-slate-200">
-                  <div v-if="store.selectedDetail?.decisions?.[0]">
-                    <div class="font-mono">target={{ store.selectedDetail.decisions[0].operation_plan?.target_price }}</div>
-                    <div class="font-mono">stop={{ store.selectedDetail.decisions[0].operation_plan?.stop_price }}</div>
-                    <div class="font-mono">share={{ store.selectedDetail.decisions[0].operation_plan?.suggested_share }}</div>
-                    <div class="font-mono">window={{ store.selectedDetail.decisions[0].operation_plan?.time_window }}</div>
+                  <div v-if="latestDecision">
+                    <div class="font-mono">target={{ latestDecision.operation_plan?.target_price }}</div>
+                    <div class="font-mono">stop={{ latestDecision.operation_plan?.stop_price }}</div>
+                    <div class="font-mono">share={{ latestDecision.operation_plan?.suggested_share }}</div>
+                    <div class="font-mono">window={{ latestDecision.operation_plan?.time_window }}</div>
+
+                    <div v-if="targetDistance" class="mt-2 text-xs text-slate-400">
+                      距离 target：
+                      <span class="font-mono" :class="targetDistanceClass">
+                        {{ targetDistance.diff.toFixed(2) }} ({{ targetDistance.pct.toFixed(2) }}%)
+                      </span>
+                    </div>
+                    <div v-if="stopDistance" class="text-xs text-slate-400">
+                      距离 stop：
+                      <span class="font-mono" :class="stopDistanceClass">
+                        {{ stopDistance.diff.toFixed(2) }} ({{ stopDistance.pct.toFixed(2) }}%)
+                      </span>
+                    </div>
                   </div>
                   <div v-else class="text-slate-400">暂无</div>
                 </div>
@@ -256,7 +319,7 @@ watch(
               <div class="mt-3">
                 <PriceChart
                   v-if="store.selectedDetail"
-                  :points="store.selectedDetail.close_series || []"
+                  :points="store.chartPoints"
                   :decisions="store.selectedDetail.decisions || []"
                 />
                 <div v-else class="text-xs text-slate-400">暂无图表数据</div>

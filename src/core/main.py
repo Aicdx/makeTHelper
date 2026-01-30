@@ -19,13 +19,12 @@ from src.utils.symbols import normalize_symbol
 from src.utils.dotenv_loader import load_env
 from src.utils.alert_policy import DailyBudget, DecisionLogger, load_alert_policy_cfg, score_low_high
 from src.utils.cn_names import get_cn_name
-from src.server.data_bus import data_bus
+from src.server.shared_state import data_bus
 from src.server.monitor_server import start_monitor_server
+from src.server import shared_state
 
 
 def _setup_logging(level: str) -> None:
-    # Ensure logs are visible in VSCode integrated terminal by forcing a StreamHandler.
-    # `force=True` avoids situations where other modules configured logging earlier.
     handler = logging.StreamHandler(stream=sys.stdout)
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
 
@@ -37,7 +36,6 @@ def _setup_logging(level: str) -> None:
 
 
 def _is_trading_time_cn(now: datetime) -> bool:
-    # Simple trading session check in local time (WSL uses system time)
     hm = now.hour * 60 + now.minute
     morning = 9 * 60 + 30 <= hm <= 11 * 60 + 30
     afternoon = 13 * 60 <= hm <= 15 * 60
@@ -45,7 +43,7 @@ def _is_trading_time_cn(now: datetime) -> bool:
 
 
 def main() -> None:
-    load_env()  # Load .env file for proxy settings, etc.
+    load_env()
 
     with open("config.yaml", "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
@@ -86,16 +84,13 @@ def main() -> None:
     llm_throttle = timedelta(minutes=int(llm_cfg.get("throttle_minutes", 5)))
 
     store = BarStore(window_size=window_size)
+    shared_state.bar_store = store
 
     llm_last_call_at: dict[str, datetime] = {}
 
-    # Rolling T+0 state machine per symbol
-    # base_share=1.0 (底仓一份), t_share in [-1.0, +1.0] step=0.5
-    # total_position = 1.0 + t_share, so max position is 2.0 and min is 0.0
     position_state_by_symbol: dict[str, str] = {sym: "HOLDING_STOCK" for sym in symbols}
     t_share_by_symbol: dict[str, float] = {sym: 0.0 for sym in symbols}
 
-    # Test mode: force exactly one LLM decision per symbol once we have enough data.
     test_llm_done: dict[str, bool] = {}
 
     log = logging.getLogger(__name__)
@@ -112,7 +107,6 @@ def main() -> None:
     test_force_llm = bool(agent_cfg.get("test_force_llm", False))
     heartbeat_every_loops = int(agent_cfg.get("heartbeat_every_loops", 1))
 
-    # Alert policy (trading hours / freshness / low-high score / daily budget + replacement / decision log)
     policy = load_alert_policy_cfg(cfg)
     decision_logger = DecisionLogger(log_dir=policy.log_dir, file_prefix=policy.log_file_prefix)
     daily_budget = DailyBudget(
@@ -165,7 +159,6 @@ def main() -> None:
 
             latest_bar = win[-1]
 
-            # Update monitoring data bus with the latest price snapshot
             cn_name_for_bus = get_cn_name(sym) or ""
             data_bus.update_snapshot(
                 sym,
@@ -199,7 +192,6 @@ def main() -> None:
                 ind=snap,
             )
 
-            # Test mode: once we have enough data, force exactly ONE LLM decision per symbol.
             if test_mode and test_force_llm and not test_llm_done.get(sym, False):
                 from src.signals.signals import SignalEvent
 
@@ -245,6 +237,12 @@ def main() -> None:
                                 "signal": event.signal.value,
                                 "reason": event.reason,
                                 "data_source": source_tag,
+                                "trend_filter": {
+                                    "enabled": bool(strat_cfg.get("enable_trend_filter", True)),
+                                    "ma_trend": float(snap.ma_trend) if snap.ma_trend is not None else None,
+                                    "close": float(latest_bar.close),
+                                    "above_ma_trend": (float(latest_bar.close) >= float(snap.ma_trend)) if snap.ma_trend is not None else None,
+                                },
                             },
                         )
                         position_state = position_state_by_symbol.get(sym, "HOLDING_STOCK")
@@ -252,7 +250,6 @@ def main() -> None:
                         decision: LLMDecision = llm_decision(ctx, position_state=position_state, t_share=t_share)
                         llm_last_call_at[sym] = latest_bar.ts
 
-                        # Store decision in monitoring bus
                         data_bus.add_decision(sym, decision)
 
                         cn_name_for_log = get_cn_name(sym)
@@ -266,20 +263,18 @@ def main() -> None:
                             decision.confidence,
                             "; ".join(decision.reasons[:3]),
                             "; ".join(decision.risks[:3]),
-                            "; ".join([
-                                f"target={decision.operation_plan.get('target_price')} stop={decision.operation_plan.get('stop_price')} share={decision.operation_plan.get('suggested_share')} window={decision.operation_plan.get('time_window')}"
-                            ]),
+                            "; ".join(
+                                [
+                                    f"target={decision.operation_plan.get('target_price')} stop={decision.operation_plan.get('stop_price')} share={decision.operation_plan.get('suggested_share')} window={decision.operation_plan.get('time_window')}"
+                                ]
+                            ),
                             "; ".join(decision.next_decision_point[:3]),
                         )
 
-                        # === alert policy: trading hours / freshness / low-high score / daily budget + replacement / decision log ===
                         in_trading_hours = _is_trading_time_cn(now)
                         data_age_s = (now - latest_bar.ts).total_seconds()
                         is_fresh = data_age_s <= float(policy.max_data_age_seconds)
 
-                        # Update rolling T+0 state machine (scheme C)
-                        # base_share=1.0, t_share in [-1.0, +1.0] step=0.5
-                        # total_position = 1.0 + t_share
                         exec_share = 1.0 if float(decision.confidence) >= 0.8 else 0.5
 
                         def _clamp(v: float, lo: float, hi: float) -> float:
@@ -288,25 +283,20 @@ def main() -> None:
                         cur_t = float(t_share_by_symbol.get(sym, 0.0))
 
                         if decision.action == "SELL_PART":
-                            # 卖出：减少总仓位 -> t_share 变小
                             new_t = _clamp(cur_t - exec_share, -1.0, 1.0)
                             t_share_by_symbol[sym] = new_t
                         elif decision.action == "BUY_BACK":
-                            # 买回：增加总仓位 -> t_share 变大
                             new_t = _clamp(cur_t + exec_share, -1.0, 1.0)
                             t_share_by_symbol[sym] = new_t
                         elif decision.action == "CANCEL_PLAN":
-                            # 回归初始底仓状态
                             t_share_by_symbol[sym] = 0.0
 
-                        # 根据 t_share 决定状态（边界值更明确）
                         cur_t2 = float(t_share_by_symbol.get(sym, 0.0))
                         if cur_t2 <= -0.999:
                             position_state_by_symbol[sym] = "HOLDING_CASH"
                         elif cur_t2 >= 0.999:
                             position_state_by_symbol[sym] = "HOLDING_STOCK"
                         else:
-                            # 中间态：既可买也可卖，这里保留 HOLDING_STOCK 作为默认
                             position_state_by_symbol[sym] = "HOLDING_STOCK"
 
                         action_side = "BUY" if decision.action == "BUY_BACK" else ("SELL" if decision.action == "SELL_PART" else None)
@@ -360,7 +350,6 @@ def main() -> None:
                                 should_emit = False
                                 skip_reason = "budget_not_selected"
 
-                        # Always write decision log (append, never overwrite)
                         cn_name = get_cn_name(sym)
                         decision_logger.append(
                             {
@@ -436,7 +425,6 @@ def main() -> None:
                         if action_side in {"BUY", "SELL"} and isinstance(score, float):
                             reason_prefix += f" score={score:.3f}"
 
-                        # 将新动作映射到 SignalType（已升级为新枚举）
                         signal_type = SignalType.INFO
                         if decision.action == "BUY_BACK":
                             signal_type = SignalType.BUY_BACK
@@ -446,11 +434,10 @@ def main() -> None:
                             signal_type = SignalType.CANCEL_PLAN
                         elif decision.action == "HOLD_POSITION":
                             signal_type = SignalType.HOLD_POSITION
-                            
-                        # 构建详细原因，包含仓位信息
+
                         position_info = f"[总仓={1.0 + float(t_share_by_symbol.get(sym, 0.0)):.1f} t_share={float(t_share_by_symbol.get(sym, 0.0)):+.1f}]"
                         full_reason = f"{reason_prefix} {position_info}; " + "; ".join(decision.reasons[:4])
-                        
+
                         emit(
                             event.__class__(
                                 symbol=sym,
