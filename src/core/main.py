@@ -83,7 +83,7 @@ def main() -> None:
     llm_min_conf = float(llm_cfg.get("min_confidence", 0.6))
     llm_throttle = timedelta(minutes=int(llm_cfg.get("throttle_minutes", 5)))
 
-    store = BarStore(window_size=window_size)
+    store = BarStore(window_size=window_size, db_path=os.getenv("BARSTORE_DB_PATH", "data/bars.db"))
     shared_state.bar_store = store
 
     llm_last_call_at: dict[str, datetime] = {}

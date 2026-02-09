@@ -12,9 +12,7 @@ from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from src.server.shared_state import bar_store
-
-from .data_bus import SymbolSnapshot
+from src.server import shared_state
 from src.server.shared_state import data_bus
 
 
@@ -166,18 +164,22 @@ async def get_full_series(symbol: str, limit: int = Query(800, ge=1, le=5000)):
 
     Data source: BarStore from the running main process (shared_state.bar_store).
     """
-    if bar_store is None:
+    store = shared_state.bar_store
+    if store is None:
         return {"error": "bar_store_not_ready"}
 
-    win = bar_store.get_window(symbol, int(limit))
+    win = store.get_window(symbol, int(limit))
     if not win:
         return []
 
-    # Filter to today's bars in local timezone
-    today = datetime.now().date()
+    # Filter to today's bars in Beijing time
+    import datetime as dt
+    beijing_now = datetime.now(dt.timezone(dt.timedelta(hours=8)))
+    today = beijing_now.date()
     out = []
     for b in win:
         try:
+            # b.ts is naive datetime representing Beijing time
             if b.ts.date() != today:
                 continue
             out.append(
