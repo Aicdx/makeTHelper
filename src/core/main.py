@@ -144,9 +144,11 @@ def main() -> None:
 
             closes = [b.close for b in win]
             vols = [b.volume for b in win]
+            amounts = [getattr(b, "amount", b.close * b.volume) for b in win]
             snap = latest_snapshot(
                 closes=closes,
                 volumes=vols,
+                amounts=amounts,
                 macd_fast=macd_fast,
                 macd_slow=macd_slow,
                 macd_signal=macd_signal,

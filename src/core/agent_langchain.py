@@ -93,15 +93,19 @@ def _summarize_bars(bars: List[Bar], n: int = 20) -> Dict[str, Any]:
 def _agent_prompt() -> str:
     return (
         "你是一个A股日内做T的交易告警智能体（只告警，不下单）。\n"
-        "你会收到：分钟K线摘要、MACD/均线/量能指标、以及规则触发的候选信号（如金叉/死叉/趋势禁做T）。\n"
-        "你的任务：输出一个严格JSON对象，符合给定schema（action/confidence/reasons/risks/suggested_plan）。\n"
+        "你的决策逻辑不再仅仅依赖MACD金叉死叉，而是基于【量价走势】、【均价线乖离度】和【形态识别】。\n"
+        "核心策略参考：\n"
+        "1. **急拉不涨停先抛**：开盘半小时内急拉但无法封板，冲高乏力（乖离度bias_vwap过高）时卖出底仓，待跳水回落再买回。\n"
+        "2. **急跌量缩反抽**：股价急跌（如>5%）且成交量萎缩，远离均价线（bias_vwap极负）时买入，反抽均价线（bias_vwap趋向0）时卖出。\n"
+        "3. **低位抬底买入**：股价低位震荡，底部重心不断抬高（三重底），在第三个低点买入。\n"
+        "4. **均价线引力**：股价是风筝，均价线（vwap）是线。股价远离均线太远必有回抽（高抛低吸点）。\n"
+        "5. **走势强度**：关注量能对比（vol/vma）。急拉需放量，阴跌需缩量。\n\n"
+        "你会收到：分钟K线摘要、MACD/均线/量能指标、分时均价线(vwap)及乖离度(bias_vwap)、候选信号原因。\n"
+        "你的任务：输出严格JSON对象，符合给定schema。\n"
         "要求：\n"
         "- action 只能是 BUY_BACK/SELL_PART/HOLD_POSITION/CANCEL_PLAN\n"
-        "- reasons 3~8条，必须引用输入中的具体数值/现象（例如 close 与 MA60、dif/dea/hist、量能对比等）\n"
-        "- risks 2~6条，提醒可能的失败情形（假信号、缩量、趋势下行、数据延迟等）\n"
-        "- operation_plan 给出 target_price/stop_price/suggested_share(0.5或1.0)/time_window\n"
-        "- next_decision_point 2~4条，说明下一步验证条件\n"
-        "- 若数据不足或源不稳定，优先输出 HOLD_POSITION 或 CANCEL_PLAN，并在 risks 中说明\n"
+        "- reasons 引用具体数值（如 bias_vwap, vwap, 量能倍率）及上述策略逻辑\n"
+        "- operation_plan 给出明确的 target_price/stop_price\n"
     )
 
 
@@ -109,11 +113,13 @@ def _print_heartbeat(sym: str, latest_bar: Bar, snap: Any, source_tag: str) -> N
     ma = snap.ma_trend
     vma = snap.vma
     vol = snap.vol
+    vwap = snap.vwap
+    bias = snap.bias_vwap
     print(
-        f"[HEARTBEAT {datetime.now():%H:%M:%S}] {sym} ts={latest_bar.ts:%Y-%m-%d %H:%M} "
-        f"close={latest_bar.close:.3f} dif={snap.dif:.4f} dea={snap.dea:.4f} hist={snap.hist:.4f} "
-        f"vol={(f'{vol:.0f}' if vol is not None else 'NA')} vma={(f'{vma:.0f}' if vma is not None else 'NA')} "
-        f"ma={(f'{ma:.3f}' if ma is not None else 'NA')} source={source_tag}"
+        f"[HEARTBEAT {datetime.now():%H:%M:%S}] {sym} ts={latest_bar.ts:%H:%M} "
+        f"price={latest_bar.close:.2f} vwap={(f'{vwap:.2f}' if vwap else 'NA')} bias={(f'{bias:.2f}%' if bias else 'NA')} "
+        f"hist={snap.hist:.4f} vol={(f'{vol:.0f}' if vol is not None else 'NA')} vma={(f'{vma:.0f}' if vma is not None else 'NA')} "
+        f"source={source_tag}"
     )
 
 
@@ -206,9 +212,11 @@ def run_watch(cfg_path: str = "config.yaml") -> None:
 
             closes = [b.close for b in win]
             vols = [b.volume for b in win]
+            amounts = [getattr(b, "amount", b.close * b.volume) for b in win]
             snap = latest_snapshot(
                 closes=closes,
                 volumes=vols,
+                amounts=amounts,
                 macd_fast=macd_fast,
                 macd_slow=macd_slow,
                 macd_signal=macd_signal,

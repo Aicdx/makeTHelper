@@ -2,9 +2,7 @@ symbols:
   - sz300308
   - sz300502
   - sz301486
-  - sz300058
-  - sz300986
-  - sh688270
+  - sz002342
 poll_interval_seconds: 15
 window_size: 600
 agent:
@@ -25,7 +23,7 @@ strategy:
   enable_trend_filter: true
 llm_agent:
   enabled: true
-  model: "Qwen/Qwen2.5-72B-Instruct"
+  model: "deepseek-ai/DeepSeek-V3.1-Terminus"
   min_confidence: 0.6
   throttle_minutes: 5
 data_source:

@@ -14,6 +14,26 @@ class IndicatorSnapshot:
     ma_trend: float | None
     vma: float | None
     vol: float | None
+    vwap: float | None  # 分时均价线
+    bias_vwap: float | None  # 股价偏离均价线的百分比
+
+
+def compute_vwap(prices: List[float], volumes: List[float], amounts: List[float] | None = None) -> float | None:
+    """计算分时均价线 (VWAP = 累计成交额 / 累计成交量)"""
+    if not prices or not volumes or len(prices) != len(volumes):
+        return None
+    
+    # 如果没有直接提供成交额，则用价格*成交量估算（注：A股分时通常取 均价=成交额/成交量）
+    if amounts:
+        total_amount = sum(amounts)
+        total_volume = sum(volumes)
+    else:
+        total_amount = sum(p * v for p, v in zip(prices, volumes))
+        total_volume = sum(volumes)
+    
+    if total_volume == 0:
+        return None
+    return total_amount / total_volume
 
 
 def _ema(arr: np.ndarray, span: int) -> np.ndarray:
@@ -56,6 +76,7 @@ def compute_sma(values: List[float], n: int) -> np.ndarray:
 def latest_snapshot(
     closes: List[float],
     volumes: List[float] | None,
+    amounts: List[float] | None,
     macd_fast: int,
     macd_slow: int,
     macd_signal: int,
@@ -75,11 +96,19 @@ def latest_snapshot(
 
     vma = None
     vol = None
+    vwap = None
+    bias_vwap = None
+    
     if volumes:
         vol = float(volumes[-1])
         vma_arr = compute_sma(volumes, vma_n)
         if vma_n and vma_n > 1 and vma_arr.size and not np.isnan(vma_arr[-1]):
             vma = float(vma_arr[-1])
+        
+        # 计算 VWAP (基于全天累积)
+        vwap = compute_vwap(closes, volumes, amounts)
+        if vwap:
+            bias_vwap = (closes[-1] - vwap) / vwap * 100
 
     return IndicatorSnapshot(
         dif=float(dif[-1]),
@@ -88,5 +117,7 @@ def latest_snapshot(
         ma_trend=ma_trend,
         vma=vma,
         vol=vol,
+        vwap=vwap,
+        bias_vwap=bias_vwap,
     )
 

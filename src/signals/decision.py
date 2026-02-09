@@ -39,6 +39,8 @@ def build_llm_payload(ctx: DecisionContext, position_state: str, t_share: float)
             "ma_trend": float(ind.ma_trend) if ind.ma_trend is not None else None,
             "vma": float(ind.vma) if ind.vma is not None else None,
             "vol": float(ind.vol) if ind.vol is not None else None,
+            "vwap": float(ind.vwap) if ind.vwap is not None else None,
+            "bias_vwap": float(ind.bias_vwap) if ind.bias_vwap is not None else None,
         },
         "recent": {
             "timestamps": ctx.recent_timestamps[-20:],
