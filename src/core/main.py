@@ -87,6 +87,7 @@ def main() -> None:
     shared_state.bar_store = store
 
     llm_last_call_at: dict[str, datetime] = {}
+    last_buy_price_by_symbol: dict[str, float] = {sym: 0.0 for sym in symbols}
 
     position_state_by_symbol: dict[str, str] = {sym: "HOLDING_STOCK" for sym in symbols}
     t_share_by_symbol: dict[str, float] = {sym: 0.0 for sym in symbols}
@@ -160,7 +161,20 @@ def main() -> None:
                 continue
 
             latest_bar = win[-1]
-
+            # 获取今日开盘价和昨收价（简单处理：从当前窗口中寻找今日第一根K线的open作为open_price）
+            # 昨收价建议从之前的历史数据或配置中获取，这里我们尝试从win中找跨天分界
+            curr_day = latest_bar.ts.date()
+            today_open = None
+            prev_close_val = None
+            
+            for i in range(len(win)):
+                if win[i].ts.date() == curr_day:
+                    if today_open is None:
+                        today_open = win[i].open
+                        if i > 0:
+                            prev_close_val = win[i-1].close
+                    break
+            
             cn_name_for_bus = get_cn_name(sym) or ""
             data_bus.update_snapshot(
                 sym,
@@ -192,6 +206,8 @@ def main() -> None:
                 ts=latest_bar.ts,
                 close=latest_bar.close,
                 ind=snap,
+                prev_close=prev_close_val,
+                open_price=today_open,
             )
 
             if test_mode and test_force_llm and not test_llm_done.get(sym, False):
@@ -246,6 +262,9 @@ def main() -> None:
                                     "above_ma_trend": (float(latest_bar.close) >= float(snap.ma_trend)) if snap.ma_trend is not None else None,
                                 },
                             },
+                            prev_close=prev_close_val,
+                            open_price=today_open,
+                            last_op_price=last_buy_price_by_symbol.get(sym),
                         )
                         position_state = position_state_by_symbol.get(sym, "HOLDING_STOCK")
                         t_share = float(t_share_by_symbol.get(sym, 0.0))
@@ -287,9 +306,14 @@ def main() -> None:
                         if decision.action == "SELL_PART":
                             new_t = _clamp(cur_t - exec_share, -1.0, 1.0)
                             t_share_by_symbol[sym] = new_t
+                            # 卖出后清空买入价记录（或你可以选择保留，直到仓位清零）
+                            if new_t >= 0:
+                                last_buy_price_by_symbol[sym] = 0.0
                         elif decision.action == "BUY_BACK":
                             new_t = _clamp(cur_t + exec_share, -1.0, 1.0)
                             t_share_by_symbol[sym] = new_t
+                            # 记录买入价用于盈亏计算（只在增加仓位时更新）
+                            last_buy_price_by_symbol[sym] = float(latest_bar.close)
                         elif decision.action == "CANCEL_PLAN":
                             t_share_by_symbol[sym] = 0.0
 

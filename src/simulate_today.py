@@ -49,6 +49,10 @@ def simulate_today():
         history_bars = []
         signals_found = 0
         
+        today_open = bars[0].open if bars else None
+        # 尝试从今日数据中获取昨收（如果包含昨日数据）或置为 None
+        # 模拟脚本通常只抓取今日，这里暂时只提供 today_open
+        
         for bar in bars:
             history_bars.append(bar)
             
@@ -77,7 +81,9 @@ def simulate_today():
                 symbol=sym,
                 ts=bar.ts,
                 close=bar.close,
-                ind=snap
+                ind=snap,
+                prev_close=None, # simulate_today 暂不支持获取昨收，维持原逻辑或手动补充
+                open_price=today_open
             )
             
             if event and event.signal != SignalType.INFO:

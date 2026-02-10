@@ -38,13 +38,17 @@ def run_backtest_today_with_llm():
     # 模拟仓位管理
     position_states = {sym: "HOLDING_STOCK" for sym in symbols}
     t_shares = {sym: 0.0 for sym in symbols}
+    last_op_prices = {sym: 0.0 for sym in symbols}
 
     # 2. 初始化策略引擎 (放宽测试门槛：即刻触发，不强制放量，不启用趋势过滤)
     engine = SignalEngine(
         confirm_bars=1,              # 1根确认，即刻进入LLM
         cooldown_minutes=5,          # 缩短冷却时间
         volume_multiplier=0.8,       # 极低量能要求
-        enable_trend_filter=False    # 禁用趋势过滤，让LLM全权负责
+        enable_trend_filter=False,   # 禁用趋势过滤，让LLM全权负责
+        opening_gap_threshold=0.003, # 降低跳空阈值到 0.3%，让更多早盘波动被捕捉
+        opening_confirm_bars=1,      # 早盘只需要 1 根 K 线确认
+        opening_cooldown_minutes=15  # 早盘冷却拉长，避免连续加仓
     )
 
     ind_cfg = cfg.get("indicators", {})
@@ -61,7 +65,27 @@ def run_backtest_today_with_llm():
 
     for sym in symbols:
         print(f"\n>>> 分析标的: {sym}")
-        # 获取今天的数据
+        # 1. 获取昨收价
+        prev_close_query = f"SELECT close FROM bars WHERE symbol = '{sym}' AND ts < '{today_str}' ORDER BY ts DESC LIMIT 1"
+        res = conn.execute(prev_close_query).fetchone()
+        prev_close_today = res[0] if res else None
+
+        # 2. 预加载历史数据（冷启动优化）：取今日之前最后的 100 根 K 线
+        history_query = f"SELECT * FROM bars WHERE symbol = '{sym}' AND ts < '{today_str}' ORDER BY ts DESC LIMIT 100"
+        hist_df = pd.read_sql_query(history_query, conn)
+        history_bars = []
+        if not hist_df.empty:
+            # 倒序转正序
+            hist_df = hist_df.iloc[::-1]
+            for _, row in hist_df.iterrows():
+                history_bars.append(Bar(
+                    ts=datetime.fromisoformat(row['ts']),
+                    open=row['open'], high=row['high'], low=row['low'],
+                    close=row['close'], volume=row['volume'], amount=row['amount']
+                ))
+            print(f"  已预加载 {len(history_bars)} 条历史 K 线用于指标初始化。")
+
+        # 3. 获取今天的数据
         query = f"SELECT * FROM bars WHERE symbol = '{sym}' AND ts LIKE '{today_str}%' ORDER BY ts ASC"
         df = pd.read_sql_query(query, conn)
         
@@ -69,9 +93,9 @@ def run_backtest_today_with_llm():
             print(f"  跳过: 数据库中没有 {sym} 今天的历史数据。")
             continue
             
-        print(f"  找到 {len(df)} 条今日 K 线数据。")
+        today_open = df.iloc[0]['open']
+        print(f"  找到 {len(df)} 条今日 K 线数据。昨收: {prev_close_today}, 今开: {today_open}")
         
-        history_bars = []
         rule_hits = 0
         
         for i, row in df.iterrows():
@@ -99,7 +123,21 @@ def run_backtest_today_with_llm():
             if snap is None: continue
                 
             # 评估规则
-            event = engine.evaluate(symbol=sym, ts=bar.ts, close=bar.close, ind=snap)
+            # prev_close: 用昨日最后一根bar的close作为锚点（若数据库只含今日数据则为None）
+            prev_close_val = None
+            if len(history_bars) >= 2:
+                # history_bars包含今日从开盘开始的序列，因此需要从数据库额外取昨日收盘
+                # 这里在循环外预先算好 prev_close_today（见下方）并使用
+                prev_close_val = prev_close_today
+
+            event = engine.evaluate(
+                symbol=sym,
+                ts=bar.ts,
+                close=bar.close,
+                ind=snap,
+                prev_close=prev_close_val,
+                open_price=today_open,
+            )
             
             # 监控：如果 MACD 刚交叉或放量，但还没被 engine 确认，我们打印一条调试信息
             # (这能帮你理解为什么有些点位没触发 LLM)
@@ -119,7 +157,10 @@ def run_backtest_today_with_llm():
                         symbol=sym, ts=bar.ts, close=bar.close, indicators=snap,
                         recent_closes=closes[-100:], recent_volumes=vols[-100:],
                         recent_timestamps=[b.ts.strftime("%H:%M") for b in history_bars[-100:]],
-                        rule_event={"signal": event.signal.value, "reason": event.reason}
+                        rule_event={"signal": event.signal.value, "reason": event.reason},
+                        prev_close=prev_close_val,
+                        open_price=today_open,
+                        last_op_price=last_op_prices[sym]
                     )
                     
                     decision = llm_decision(ctx, position_state=position_states[sym], t_share=t_shares[sym])
@@ -135,9 +176,11 @@ def run_backtest_today_with_llm():
                     if decision.action == "SELL_PART":
                         t_shares[sym] = max(-1.0, t_shares[sym] - 0.5)
                         if t_shares[sym] <= -0.9: position_states[sym] = "HOLDING_CASH"
+                        if t_shares[sym] >= 0: last_op_prices[sym] = 0.0
                     elif decision.action == "BUY_BACK":
                         t_shares[sym] = min(1.0, t_shares[sym] + 0.5)
                         if t_shares[sym] >= 0.9: position_states[sym] = "HOLDING_STOCK"
+                        last_op_prices[sym] = float(bar.close)
                         
                 except Exception as e:
                     print(f"  \033[31m[LLM 错误]\033[0m: {e}")

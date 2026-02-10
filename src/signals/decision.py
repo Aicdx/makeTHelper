@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, time
 from typing import Any, Dict, List, Optional
 
 from src.indicators.indicators import IndicatorSnapshot
@@ -18,6 +18,11 @@ class DecisionContext:
     recent_volumes: List[float]
     recent_timestamps: List[str]
     rule_event: Optional[Dict[str, Any]] = None
+    # 增加开盘模式相关字段
+    prev_close: Optional[float] = None
+    open_price: Optional[float] = None
+    # 增加盈亏分析字段
+    last_op_price: Optional[float] = None
 
 
 def _summarize_series(values: List[float], n: int = 20) -> List[float]:
@@ -28,6 +33,25 @@ def _summarize_series(values: List[float], n: int = 20) -> List[float]:
 
 def build_llm_payload(ctx: DecisionContext, position_state: str, t_share: float) -> Dict[str, Any]:
     ind = ctx.indicators
+
+    prev_close = float(ctx.prev_close) if ctx.prev_close is not None else None
+    open_price = float(ctx.open_price) if ctx.open_price is not None else None
+    gap_pct = (
+        ((open_price - prev_close) / prev_close)
+        if (prev_close is not None and open_price is not None and prev_close != 0.0)
+        else None
+    )
+    t = ctx.ts.time()
+    session_phase = "OPENING" if (time(9, 30) <= t < time(10, 0)) else "NORMAL"
+
+    # 计算盈亏情况
+    last_op_price = float(ctx.last_op_price) if ctx.last_op_price is not None else None
+    profit_ratio = (
+        (float(ctx.close) - last_op_price) / last_op_price
+        if (last_op_price is not None and last_op_price > 0)
+        else None
+    )
+
     payload: Dict[str, Any] = {
         "symbol": ctx.symbol,
         "ts": ctx.ts.isoformat(timespec="seconds"),
@@ -48,6 +72,16 @@ def build_llm_payload(ctx: DecisionContext, position_state: str, t_share: float)
             "volumes": _summarize_series(ctx.recent_volumes, 20),
         },
         "rule_event": ctx.rule_event,
+        "session": {
+            "phase": session_phase,
+            "prev_close": prev_close,
+            "open_price": open_price,
+            "gap_pct": gap_pct,
+        },
+        "portfolio": {
+            "last_op_price": last_op_price,
+            "profit_ratio": profit_ratio,
+        },
         "trend_context": {
             "ma_trend": float(ind.ma_trend) if ind.ma_trend is not None else None,
             "close": float(ctx.close),

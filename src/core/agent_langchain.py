@@ -230,7 +230,25 @@ def run_watch(cfg_path: str = "config.yaml") -> None:
             if loop_i % heartbeat_every_loops == 0:
                 _print_heartbeat(sym, latest_bar, snap, source_tag)
 
-            event = engine.evaluate(sym, latest_bar.ts, latest_bar.close, snap)
+            # 尝试从窗口中推断昨收/今开，用于开盘模式信号
+            curr_day = latest_bar.ts.date()
+            today_open = None
+            prev_close_val = None
+            for i in range(len(win)):
+                if win[i].ts.date() == curr_day:
+                    today_open = win[i].open
+                    if i > 0:
+                        prev_close_val = win[i-1].close
+                    break
+
+            event = engine.evaluate(
+                sym,
+                latest_bar.ts,
+                latest_bar.close,
+                snap,
+                prev_close=prev_close_val,
+                open_price=today_open,
+            )
             if event is None and not test_force_llm:
                 continue
 

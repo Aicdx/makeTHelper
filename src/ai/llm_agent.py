@@ -220,6 +220,9 @@ def decide(payload: Dict[str, Any], ts: datetime) -> LLMDecision:
 - base_share: 1.0 (初始底仓)
 - t_share: 当前已做T的仓位 [-1.0, 1.0]。
 - 执行量：默认 0.5 份；信心度 >= 0.8 时可执行 1.0 份。
+- **单边市风控**：在单边下跌趋势中（close < ma_trend），严禁连续在 15 分钟内将 t_share 从 0 加至 1.0；若出现死叉且 bias_vwap 虽负	但已回升，应果断 SELL_PART 释放仓位，为后续更优吸筹点留出额度。
+- **分批原则**：建议将 1.0 份 T 仓分两次（0.5 + 0.5）在不同支撑位执行，而非一次性梭哈。
+- **止盈锁定 (重要)**：当 `portfolio.profit_ratio` >= 0.025 (2.5%) 时，此时的 SELL_PART 属于高价值获利了结。除非股价极度放量封涨停，否则应给出 action="SELL_PART" 且 confidence >= 0.9，以防利润回吐和手续费磨损。
 
 ## 输入说明
 - vwap: 分时均价线。
@@ -249,6 +252,10 @@ def decide(payload: Dict[str, Any], ts: datetime) -> LLMDecision:
 1. 弱化MACD指标：仅作为动能参考，不作为绝对买卖点。
 2. 尊重均线：绝不建议在 bias_vwap 已经很高时追涨买入，或在 bias_vwap 已经很低时杀跌卖出。
 3. 动态止盈止损：给出的 target_price 必须在当前价格的合理波动范围内。
+4. 开盘半小时（session.phase=OPENING）优先参考昨收/今开与跳空：
+   - 允许围绕 prev_close（昨收锚点）与 gap_pct（跳空幅度）做回补/回落型做T决策。
+   - 对量能与MACD的要求降低为参考项，避免因指标未成熟导致无信号。
+   - 建议更保守的执行：默认 suggested_share=0.5，止损更紧，且避免连续追单。
 """
 
     try:
