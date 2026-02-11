@@ -113,7 +113,14 @@ export const useMonitorStore = defineStore('monitor', () => {
       try {
         const msg = JSON.parse(evt.data)
         if (msg?.type === 'update' && Array.isArray(msg.data)) {
-          symbols.value = msg.data
+          symbols.value = msg.data.map((s: any) => {
+            if (s.change_pct === undefined && s.open && s.close) {
+              s.change_pct = ((s.close - s.open) / s.open) * 100
+            } else if (s.change_pct === undefined && s.prev_close && s.close) {
+              s.change_pct = ((s.close - s.prev_close) / s.prev_close) * 100
+            }
+            return s
+          })
         }
       } catch {
         // ignore

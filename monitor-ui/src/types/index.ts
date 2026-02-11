@@ -5,11 +5,13 @@ export interface SymbolSummary {
   name: string
   ts: string // ISO 8601 string
   close: number
+  open?: number
   position_state: string
   t_share: number
   total_share: number
   latest_action?: string
   latest_confidence?: number
+  change_pct?: number
 }
 
 export interface OperationPlan {

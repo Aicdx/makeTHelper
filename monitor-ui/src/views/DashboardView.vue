@@ -185,6 +185,7 @@ watch(
             <tr>
               <th class="px-3 py-3 text-left font-medium">标的</th>
               <th class="px-3 py-3 text-left font-medium">最新价</th>
+              <th class="px-3 py-3 text-left font-medium">涨跌幅</th>
               <th class="px-3 py-3 text-left font-medium">action / conf</th>
               <th class="px-3 py-3 text-left font-medium">总仓 / t_share</th>
               <th class="px-3 py-3 text-left font-medium">状态</th>
@@ -203,6 +204,12 @@ watch(
                 <div class="text-xs text-slate-400">{{ s.name }}</div>
               </td>
               <td class="px-3 py-3 font-mono">{{ s.close?.toFixed(2) }}</td>
+              <td class="px-3 py-3 font-mono">
+                <span v-if="s.change_pct !== undefined" :class="s.change_pct > 0 ? 'text-rose-400' : s.change_pct < 0 ? 'text-emerald-400' : 'text-slate-400'">
+                  {{ s.change_pct > 0 ? '+' : '' }}{{ s.change_pct.toFixed(2) }}%
+                </span>
+                <span v-else class="text-slate-500">-</span>
+              </td>
               <td class="px-3 py-3">
                 <div class="font-mono">{{ s.latest_action || '-' }}</div>
                 <div class="text-xs text-slate-400">conf={{ (s.latest_confidence ?? 0).toFixed(2) }}</div>
@@ -321,6 +328,7 @@ watch(
                   v-if="store.selectedDetail"
                   :points="store.chartPoints"
                   :decisions="store.selectedDetail.decisions || []"
+                  :base-price="store.selectedSummary?.open"
                 />
                 <div v-else class="text-xs text-slate-400">暂无图表数据</div>
               </div>

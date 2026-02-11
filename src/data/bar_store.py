@@ -43,6 +43,43 @@ class BarStore:
                 )
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_symbol_ts ON bars (symbol, ts)")
+            
+            # 新增信号存储表
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS signals (
+                    symbol TEXT,
+                    ts TEXT,
+                    signal_type TEXT,
+                    price REAL,
+                    rule_reason TEXT,
+                    llm_action TEXT,
+                    llm_confidence REAL,
+                    llm_reasons TEXT,
+                    t_share REAL,
+                    PRIMARY KEY (symbol, ts, signal_type)
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_sig_symbol_ts ON signals (symbol, ts)")
+
+    def save_signal(self, symbol: str, ts: datetime, signal_type: str, price: float, 
+                    rule_reason: str = "", llm_action: str = "", llm_confidence: float = 0.0, 
+                    llm_reasons: str = "", t_share: float = 0.0):
+        """保存买卖点信号到数据库"""
+        if not self._db_path:
+            return
+            
+        with sqlite3.connect(self._db_path) as conn:
+            conn.execute("""
+                INSERT INTO signals (symbol, ts, signal_type, price, rule_reason, llm_action, llm_confidence, llm_reasons, t_share)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(symbol, ts, signal_type) DO UPDATE SET
+                    price=excluded.price,
+                    rule_reason=excluded.rule_reason,
+                    llm_action=excluded.llm_action,
+                    llm_confidence=excluded.llm_confidence,
+                    llm_reasons=excluded.llm_reasons,
+                    t_share=excluded.t_share
+            """, (symbol, ts.isoformat(), signal_type, float(price), rule_reason, llm_action, llm_confidence, llm_reasons, t_share))
 
     def _load_from_db(self):
         """Load recent bars from SQLite into memory windows."""
@@ -152,6 +189,53 @@ class BarStore:
                         volume=excluded.volume,
                         amount=excluded.amount
                 """, db_updates)
+
+    def get_signals(self, symbol: str, limit: int = 2000, date: Optional[datetime] = None) -> List[Dict[str, object]]:
+        """Load saved signals for the given symbol from SQLite.
+
+        Returns rows ordered by ts ascending.
+        """
+        if not self._db_path:
+            return []
+
+        # Default to today's date in Beijing time
+        if date is None:
+            import datetime as dt
+
+            beijing_now = datetime.now(dt.timezone(dt.timedelta(hours=8)))
+            date = beijing_now.replace(tzinfo=None)
+
+        date_prefix = date.date().isoformat()
+
+        with sqlite3.connect(self._db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT ts, signal_type, price, rule_reason, llm_action, llm_confidence, llm_reasons, t_share
+                FROM signals
+                WHERE symbol = ? AND ts LIKE ?
+                ORDER BY ts ASC
+                LIMIT ?
+                """,
+                (symbol, f"{date_prefix}%", int(limit)),
+            )
+            rows = cursor.fetchall()
+
+        out: List[Dict[str, object]] = []
+        for row in rows:
+            out.append(
+                {
+                    "ts": row[0],
+                    "signal_type": row[1],
+                    "price": row[2],
+                    "rule_reason": row[3],
+                    "llm_action": row[4],
+                    "llm_confidence": row[5],
+                    "llm_reasons": row[6],
+                    "t_share": row[7],
+                }
+            )
+        return out
 
     def get_window(self, symbol: str, n: int) -> List[Bar]:
         win = self._data.get(symbol)

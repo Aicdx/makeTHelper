@@ -21,6 +21,7 @@ class SymbolSummary(BaseModel):
     name: str
     ts: datetime
     close: float
+    open: Optional[float] = None
     position_state: str
     t_share: float
     total_share: float
@@ -96,11 +97,32 @@ app.add_middleware(
 
 
 def snapshot_to_summary(snapshot: SymbolSnapshot) -> Dict[str, Any]:
+    # Open price is derived from today's first intraday bar in bar_store (Beijing time).
+    open_price: Optional[float] = None
+    try:
+        store = shared_state.bar_store
+        if store is not None:
+            win = store.get_window(snapshot.symbol, 5000)
+            if win:
+                import datetime as dt
+
+                beijing_now = datetime.now(dt.timezone(dt.timedelta(hours=8)))
+                today = beijing_now.date()
+                for b in win:
+                    # b.ts is naive datetime representing Beijing time
+                    if b.ts.date() != today:
+                        continue
+                    open_price = float(b.open)
+                    break
+    except Exception:
+        open_price = None
+
     return {
         "symbol": snapshot.symbol,
         "name": snapshot.name,
         "ts": snapshot.ts.isoformat(),
         "close": snapshot.close,
+        "open": open_price,
         "position_state": snapshot.position_state,
         "t_share": snapshot.t_share,
         "total_share": 1.0 + snapshot.t_share,
@@ -119,7 +141,39 @@ async def list_symbols():
 async def get_symbol_detail(symbol: str):
     snapshot = data_bus.get_snapshot(symbol)
     if not snapshot:
-        return {"error": f"Symbol {symbol} not found"}
+        # Try to restore snapshot if it exists in bar_store but not in memory
+        store = shared_state.bar_store
+        if store and symbol in store._data:
+            snapshot = data_bus.get_or_create_snapshot(symbol)
+            # Basic info from store
+            snapshot.name = symbol # Fallback
+            win = store.get_window(symbol, 600)
+            if win:
+                snapshot.ts = win[-1].ts
+                snapshot.close = win[-1].close
+                for b in win:
+                    data_bus.add_close_point(symbol, b.ts, b.close)
+        else:
+            return {"error": f"Symbol {symbol} not found"}
+
+    # Restore signal history if memory is empty
+    if not snapshot.decision_history:
+        store = shared_state.bar_store
+        if store:
+            signals = store.get_signals(symbol)
+            from src.ai.llm_agent import LLMDecision
+            for sig in signals:
+                decision = LLMDecision(
+                    action=str(sig["llm_action"]),
+                    confidence=float(sig["llm_confidence"]),
+                    reasons=str(sig["llm_reasons"]).split("; "),
+                    risks=[],
+                    operation_plan={},
+                    next_decision_point=[],
+                    position_state="",
+                    ts=datetime.fromisoformat(str(sig["ts"]))
+                )
+                data_bus.add_decision(symbol, decision)
 
     close_series = [
         {"ts": point["ts"], "close": point["close"]} for point in snapshot.close_series

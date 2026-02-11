@@ -40,15 +40,15 @@ def run_backtest_today_with_llm():
     t_shares = {sym: 0.0 for sym in symbols}
     last_op_prices = {sym: 0.0 for sym in symbols}
 
-    # 2. 初始化策略引擎 (放宽测试门槛：即刻触发，不强制放量，不启用趋势过滤)
+    strat_cfg = cfg.get("strategy", {})
     engine = SignalEngine(
-        confirm_bars=1,              # 1根确认，即刻进入LLM
-        cooldown_minutes=5,          # 缩短冷却时间
-        volume_multiplier=0.8,       # 极低量能要求
-        enable_trend_filter=False,   # 禁用趋势过滤，让LLM全权负责
-        opening_gap_threshold=0.003, # 降低跳空阈值到 0.3%，让更多早盘波动被捕捉
-        opening_confirm_bars=1,      # 早盘只需要 1 根 K 线确认
-        opening_cooldown_minutes=15  # 早盘冷却拉长，避免连续加仓
+        confirm_bars=int(strat_cfg.get("confirm_bars", 1)),
+        cooldown_minutes=int(strat_cfg.get("cooldown_minutes", 5)),
+        volume_multiplier=float(strat_cfg.get("volume_multiplier", 0.8)),
+        enable_trend_filter=bool(strat_cfg.get("enable_trend_filter", False)),
+        opening_gap_threshold=float(strat_cfg.get("opening_gap_threshold", 0.003)),
+        opening_confirm_bars=int(strat_cfg.get("opening_confirm_bars", 1)),
+        opening_cooldown_minutes=int(strat_cfg.get("opening_cooldown_minutes", 15)),
     )
 
     ind_cfg = cfg.get("indicators", {})
@@ -164,6 +164,34 @@ def run_backtest_today_with_llm():
                     )
                     
                     decision = llm_decision(ctx, position_state=position_states[sym], t_share=t_shares[sym])
+
+                    # 保存信号到 SQLite (与实盘一致)
+                    # 注意：这里复用 bars.db，同一个库里已有 signals 表
+                    with sqlite3.connect(db_path) as _conn2:
+                        _conn2.execute(
+                            """
+                            INSERT INTO signals (symbol, ts, signal_type, price, rule_reason, llm_action, llm_confidence, llm_reasons, t_share)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ON CONFLICT(symbol, ts, signal_type) DO UPDATE SET
+                                price=excluded.price,
+                                rule_reason=excluded.rule_reason,
+                                llm_action=excluded.llm_action,
+                                llm_confidence=excluded.llm_confidence,
+                                llm_reasons=excluded.llm_reasons,
+                                t_share=excluded.t_share
+                            """,
+                            (
+                                sym,
+                                bar.ts.isoformat(),
+                                event.signal.value,
+                                float(bar.close),
+                                event.reason,
+                                decision.action,
+                                float(decision.confidence),
+                                "; ".join(decision.reasons),
+                                float(t_shares[sym]),
+                            ),
+                        )
                     
                     color = "\033[92m" if decision.action == "BUY_BACK" else ("\033[91m" if decision.action == "SELL_PART" else "\033[90m")
                     reset = "\033[0m"

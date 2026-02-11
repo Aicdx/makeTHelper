@@ -72,10 +72,13 @@ def main() -> None:
 
     strat_cfg = cfg.get("strategy", {})
     engine = SignalEngine(
-        confirm_bars=int(strat_cfg.get("confirm_bars", 2)),
-        cooldown_minutes=int(strat_cfg.get("cooldown_minutes", 15)),
-        volume_multiplier=float(strat_cfg.get("volume_multiplier", 1.2)),
-        enable_trend_filter=bool(strat_cfg.get("enable_trend_filter", True)),
+        confirm_bars=int(strat_cfg.get("confirm_bars", 1)),
+        cooldown_minutes=int(strat_cfg.get("cooldown_minutes", 5)),
+        volume_multiplier=float(strat_cfg.get("volume_multiplier", 0.8)),
+        enable_trend_filter=bool(strat_cfg.get("enable_trend_filter", False)),
+        opening_gap_threshold=float(strat_cfg.get("opening_gap_threshold", 0.003)),
+        opening_confirm_bars=int(strat_cfg.get("opening_confirm_bars", 1)),
+        opening_cooldown_minutes=int(strat_cfg.get("opening_cooldown_minutes", 15)),
     )
 
     llm_cfg = cfg.get("llm_agent", {})
@@ -119,6 +122,17 @@ def main() -> None:
 
     if test_mode:
         log.warning("Test mode enabled: will run outside trading hours; test_force_llm=%s", test_force_llm)
+
+    # --- 启动补齐逻辑 (Warmup) ---
+    log.info("Starting warmup: fetching initial bars for %d symbols...", len(symbols))
+    for sym in symbols:
+        bars, source_tag = fetch_bars(cfg, sym)
+        if bars:
+            store.upsert_bars(sym, bars)
+            log.info("Warmup %s: loaded %d bars from %s", sym, len(bars), source_tag)
+        else:
+            log.warning("Warmup %s: failed to fetch initial bars", sym)
+    # --------------------------
 
     loop_i = 0
     while True:
@@ -272,6 +286,19 @@ def main() -> None:
                         llm_last_call_at[sym] = latest_bar.ts
 
                         data_bus.add_decision(sym, decision)
+                        
+                        # 保存信号到 SQLite
+                        store.save_signal(
+                            symbol=sym,
+                            ts=latest_bar.ts,
+                            signal_type=event.signal.value,
+                            price=latest_bar.close,
+                            rule_reason=event.reason,
+                            llm_action=decision.action,
+                            llm_confidence=decision.confidence,
+                            llm_reasons="; ".join(decision.reasons),
+                            t_share=float(t_share_by_symbol.get(sym, 0.0))
+                        )
 
                         cn_name_for_log = get_cn_name(sym)
                         name_tag = f"{cn_name_for_log} " if cn_name_for_log else ""
