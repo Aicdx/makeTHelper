@@ -114,10 +114,12 @@ export const useMonitorStore = defineStore('monitor', () => {
         const msg = JSON.parse(evt.data)
         if (msg?.type === 'update' && Array.isArray(msg.data)) {
           symbols.value = msg.data.map((s: any) => {
-            if (s.change_pct === undefined && s.open && s.close) {
-              s.change_pct = ((s.close - s.open) / s.open) * 100
-            } else if (s.change_pct === undefined && s.prev_close && s.close) {
-              s.change_pct = ((s.close - s.prev_close) / s.prev_close) * 100
+            // 优先使用后端计算好的 change_pct
+            if (s.change_pct === undefined) {
+              // 如果后端没给，前端降级计算：日内涨跌幅通常以今开(open)为基准
+              if (s.open && s.close) {
+                s.change_pct = ((s.close - s.open) / s.open) * 100
+              }
             }
             return s
           })

@@ -6,11 +6,13 @@ export interface SymbolSummary {
   ts: string // ISO 8601 string
   close: number
   open?: number
+  prev_close?: number
   position_state: string
   t_share: number
   total_share: number
   latest_action?: string
   latest_confidence?: number
+  latest_decision_ts?: string
   change_pct?: number
 }
 

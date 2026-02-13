@@ -11,6 +11,12 @@ const actionFilter = ref<string>('')
 
 const actions = ['BUY_BACK', 'SELL_PART', 'HOLD_POSITION', 'CANCEL_PLAN', 'INFO']
 
+const todayDecisions = computed(() => {
+  const decisions = store.selectedDetail?.decisions || []
+  const today = new Date().toLocaleDateString('en-CA') // YYYY-MM-DD in local time
+  return decisions.filter(d => d.ts.startsWith(today))
+})
+
 const filteredSymbols = computed(() => {
   const kw = symbolFilter.value.trim().toLowerCase()
   const act = actionFilter.value
@@ -189,7 +195,7 @@ watch(
               <th class="px-3 py-3 text-left font-medium">action / conf</th>
               <th class="px-3 py-3 text-left font-medium">总仓 / t_share</th>
               <th class="px-3 py-3 text-left font-medium">状态</th>
-              <th class="px-3 py-3 text-left font-medium">时间</th>
+              <th class="px-3 py-3 text-left font-medium">决策时间</th>
             </tr>
           </thead>
           <tbody>
@@ -203,7 +209,10 @@ watch(
                 <div class="font-mono">{{ s.symbol }}</div>
                 <div class="text-xs text-slate-400">{{ s.name }}</div>
               </td>
-              <td class="px-3 py-3 font-mono">{{ s.close?.toFixed(2) }}</td>
+              <td class="px-3 py-3 font-mono">
+                <div class="text-sm">{{ s.close?.toFixed(2) }}</div>
+                <div class="text-[10px] text-slate-500">开:{{ s.open?.toFixed(2) }}</div>
+              </td>
               <td class="px-3 py-3 font-mono">
                 <span v-if="s.change_pct !== undefined" :class="s.change_pct > 0 ? 'text-rose-400' : s.change_pct < 0 ? 'text-emerald-400' : 'text-slate-400'">
                   {{ s.change_pct > 0 ? '+' : '' }}{{ s.change_pct.toFixed(2) }}%
@@ -218,7 +227,10 @@ watch(
                 {{ (s.total_share ?? 1).toFixed(1) }} / {{ (s.t_share ?? 0).toFixed(1) }}
               </td>
               <td class="px-3 py-3 font-mono text-xs">{{ s.position_state }}</td>
-              <td class="px-3 py-3 font-mono text-xs">{{ s.ts }}</td>
+              <td class="px-3 py-3 font-mono text-xs">
+                <div>{{ s.latest_decision_ts?.split('T')[1]?.split('.')[0] || '-' }}</div>
+                <div class="text-[10px] text-slate-500">{{ s.latest_decision_ts?.split('T')[0] }}</div>
+              </td>
             </tr>
             <tr v-if="filteredSymbols.length === 0">
               <td class="px-3 py-6 text-center text-slate-400" colspan="6">无数据</td>
@@ -266,6 +278,7 @@ watch(
                 <div class="text-xs text-slate-400">操作计划（最新一条）</div>
                 <div class="mt-2 text-sm text-slate-200">
                   <div v-if="latestDecision">
+                    <div class="text-xs text-slate-500 mb-1">决策时间: {{ latestDecision.ts }}</div>
                     <div class="font-mono">target={{ latestDecision.operation_plan?.target_price }}</div>
                     <div class="font-mono">stop={{ latestDecision.operation_plan?.stop_price }}</div>
                     <div class="font-mono">share={{ latestDecision.operation_plan?.suggested_share }}</div>
@@ -291,9 +304,9 @@ watch(
 
             <div class="mt-4 rounded-lg border border-slate-800 bg-slate-900/30 p-3">
               <div class="text-xs text-slate-400">最近决策（最多50条）</div>
-              <div class="mt-3 space-y-3">
+              <div class="mt-3 max-h-[260px] overflow-y-auto pr-1 space-y-3">
                 <div
-                  v-for="(d, idx) in store.selectedDetail?.decisions || []"
+                  v-for="(d, idx) in todayDecisions"
                   :key="idx"
                   class="rounded-md border border-slate-800 bg-slate-950 p-3"
                 >

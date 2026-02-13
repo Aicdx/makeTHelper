@@ -97,8 +97,10 @@ app.add_middleware(
 
 
 def snapshot_to_summary(snapshot: SymbolSnapshot) -> Dict[str, Any]:
-    # Open price is derived from today's first intraday bar in bar_store (Beijing time).
+    # Open price and prev_close are derived from bar_store (Beijing time).
     open_price: Optional[float] = None
+    prev_close: Optional[float] = None
+
     try:
         store = shared_state.bar_store
         if store is not None:
@@ -108,14 +110,23 @@ def snapshot_to_summary(snapshot: SymbolSnapshot) -> Dict[str, Any]:
 
                 beijing_now = datetime.now(dt.timezone(dt.timedelta(hours=8)))
                 today = beijing_now.date()
-                for b in win:
+
+                for i, b in enumerate(win):
                     # b.ts is naive datetime representing Beijing time
-                    if b.ts.date() != today:
-                        continue
-                    open_price = float(b.open)
-                    break
+                    if b.ts.date() == today:
+                        open_price = float(b.open)
+                        if i > 0:
+                            prev_close = float(win[i - 1].close)
+                        break
     except Exception:
-        open_price = None
+        pass
+
+    change_pct = 0.0
+    if prev_close is not None and prev_close > 0:
+        change_pct = (snapshot.close - prev_close) / prev_close * 100
+    elif open_price is not None and open_price > 0:
+        # fallback
+        change_pct = (snapshot.close - open_price) / open_price * 100
 
     return {
         "symbol": snapshot.symbol,
@@ -123,11 +134,14 @@ def snapshot_to_summary(snapshot: SymbolSnapshot) -> Dict[str, Any]:
         "ts": snapshot.ts.isoformat(),
         "close": snapshot.close,
         "open": open_price,
+        "prev_close": prev_close,
+        "change_pct": change_pct,
         "position_state": snapshot.position_state,
         "t_share": snapshot.t_share,
         "total_share": 1.0 + snapshot.t_share,
         "latest_action": snapshot.latest_decision.action if snapshot.latest_decision else None,
         "latest_confidence": snapshot.latest_decision.confidence if snapshot.latest_decision else None,
+        "latest_decision_ts": snapshot.latest_decision.ts.isoformat() if snapshot.latest_decision else None,
     }
 
 
