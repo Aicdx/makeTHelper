@@ -1,8 +1,6 @@
 symbols:
-  - sz300394
+  - sz300308
   - sz300502
-  - sz301486
-  - sz002342
 poll_interval_seconds: 15
 window_size: 600
 agent:
@@ -20,7 +18,7 @@ strategy:
   confirm_bars: 1
   cooldown_minutes: 5
   volume_multiplier: 0.8
-  enable_trend_filter: false
+  enable_trend_filter: true
   opening_gap_threshold: 0.003
   opening_confirm_bars: 1
   opening_cooldown_minutes: 15
